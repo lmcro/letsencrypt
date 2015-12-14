@@ -53,8 +53,8 @@ class Header(json_util.JSONObjectWithFields):
     .. warning:: This class does not support any extensions through
         the "crit" (Critical) Header Parameter (4.1.11) and as a
         conforming implementation, :meth:`from_json` treats its
-        occurence as an error. Please subclass if you seek for
-        a diferent behaviour.
+        occurrence as an error. Please subclass if you seek for
+        a different behaviour.
 
     :ivar x5tS256: "x5t#S256"
     :ivar str typ: MIME Media Type, inc. :const:`MediaType.PREFIX`.
@@ -104,7 +104,7 @@ class Header(json_util.JSONObjectWithFields):
         .. todo:: Supports only "jwk" header parameter lookup.
 
         :returns: (Public) key found in the header.
-        :rtype: :class:`acme.jose.jwk.JWK`
+        :rtype: .JWK
 
         :raises acme.jose.errors.Error: if key could not be found
 
@@ -194,8 +194,7 @@ class Signature(json_util.JSONObjectWithFields):
     def verify(self, payload, key=None):
         """Verify.
 
-        :param key: Key used for verification.
-        :type key: :class:`acme.jose.jwk.JWK`
+        :param JWK key: Key used for verification.
 
         """
         key = self.combined.find_key() if key is None else key
@@ -208,8 +207,7 @@ class Signature(json_util.JSONObjectWithFields):
              protect=frozenset(), **kwargs):
         """Sign.
 
-        :param key: Key for signature.
-        :type key: :class:`acme.jose.jwk.JWK`
+        :param JWK key: Key for signature.
 
         """
         assert isinstance(key, alg.kty)
@@ -294,10 +292,10 @@ class JWS(json_util.JSONObjectWithFields):
         # ... it must be in protected
 
         return (
-            b64.b64encode(self.signature.protected.encode('utf-8'))
-            + b'.' +
-            b64.b64encode(self.payload)
-            + b'.' +
+            b64.b64encode(self.signature.protected.encode('utf-8')) +
+            b'.' +
+            b64.b64encode(self.payload) +
+            b'.' +
             b64.b64encode(self.signature.signature))
 
     @classmethod
@@ -344,6 +342,7 @@ class JWS(json_util.JSONObjectWithFields):
             return cls(payload=json_util.decode_b64jose(jobj['payload']),
                        signatures=tuple(cls.signature_cls.from_json(sig)
                                         for sig in jobj['signatures']))
+
 
 class CLI(object):
     """JWS CLI."""

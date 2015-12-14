@@ -1,14 +1,14 @@
 """ACME protocol messages."""
 import collections
 
-from six.moves.urllib import parse as urllib_parse  # pylint: disable=import-error
-
 from acme import challenges
+from acme import errors
 from acme import fields
 from acme import jose
+from acme import util
 
 
-class Error(jose.JSONObjectWithFields, Exception):
+class Error(jose.JSONObjectWithFields, errors.Error):
     """ACME error.
 
     https://tools.ietf.org/html/draft-ietf-appsawg-http-problem-00
@@ -18,54 +18,42 @@ class Error(jose.JSONObjectWithFields, Exception):
     :ivar unicode detail:
 
     """
-    ERROR_TYPE_NAMESPACE = 'urn:acme:error:'
-    ERROR_TYPE_DESCRIPTIONS = {
-        'badCSR': 'The CSR is unacceptable (e.g., due to a short key)',
-        'badNonce': 'The client sent an unacceptable anti-replay nonce',
-        'connection': 'The server could not connect to the client for DV',
-        'dnssec': 'The server could not validate a DNSSEC signed domain',
-        'malformed': 'The request message was malformed',
-        'serverInternal': 'The server experienced an internal error',
-        'tls': 'The server experienced a TLS error during DV',
-        'unauthorized': 'The client lacks sufficient authorization',
-        'unknownHost': 'The server could not resolve a domain name',
-    }
+    ERROR_TYPE_DESCRIPTIONS = dict(
+        ('urn:acme:error:' + name, description) for name, description in (
+            ('badCSR', 'The CSR is unacceptable (e.g., due to a short key)'),
+            ('badNonce', 'The client sent an unacceptable anti-replay nonce'),
+            ('connection', 'The server could not connect to the client to '
+                'verify the domain'),
+            ('dnssec', 'The server could not validate a DNSSEC signed domain'),
+            ('malformed', 'The request message was malformed'),
+            ('rateLimited', 'There were too many requests of a given type'),
+            ('serverInternal', 'The server experienced an internal error'),
+            ('tls', 'The server experienced a TLS error during domain '
+                'verification'),
+            ('unauthorized', 'The client lacks sufficient authorization'),
+            ('unknownHost', 'The server could not resolve a domain name'),
+        )
+    )
 
     typ = jose.Field('type')
     title = jose.Field('title', omitempty=True)
     detail = jose.Field('detail')
 
-    @typ.encoder
-    def typ(value):  # pylint: disable=missing-docstring,no-self-argument
-        return Error.ERROR_TYPE_NAMESPACE + value
-
-    @typ.decoder
-    def typ(value):  # pylint: disable=missing-docstring,no-self-argument
-        # pylint thinks isinstance(value, Error), so startswith is not found
-        # pylint: disable=no-member
-        if not value.startswith(Error.ERROR_TYPE_NAMESPACE):
-            raise jose.DeserializationError('Missing error type prefix')
-
-        without_prefix = value[len(Error.ERROR_TYPE_NAMESPACE):]
-        if without_prefix not in Error.ERROR_TYPE_DESCRIPTIONS:
-            raise jose.DeserializationError('Error type not recognized')
-
-        return without_prefix
-
     @property
     def description(self):
         """Hardcoded error description based on its type.
 
+        :returns: Description if standard ACME error or ``None``.
         :rtype: unicode
 
         """
-        return self.ERROR_TYPE_DESCRIPTIONS[self.typ]
+        return self.ERROR_TYPE_DESCRIPTIONS.get(self.typ)
 
     def __str__(self):
-        if self.typ is not None:
-            return ' :: '.join([self.typ, self.description, self.detail])
-        else:
-            return str(self.detail)
+        return ' :: '.join(
+            part for part in
+            (self.typ, self.description, self.detail, self.title)
+            if part is not None)
 
 
 class _Constant(jose.JSONDeSerializable, collections.Hashable):
@@ -128,6 +116,56 @@ class Identifier(jose.JSONObjectWithFields):
     value = jose.Field('value')
 
 
+class Directory(jose.JSONDeSerializable):
+    """Directory."""
+
+    _REGISTERED_TYPES = {}
+
+    @classmethod
+    def _canon_key(cls, key):
+        return getattr(key, 'resource_type', key)
+
+    @classmethod
+    def register(cls, resource_body_cls):
+        """Register resource."""
+        assert resource_body_cls.resource_type not in cls._REGISTERED_TYPES
+        cls._REGISTERED_TYPES[resource_body_cls.resource_type] = resource_body_cls
+        return resource_body_cls
+
+    def __init__(self, jobj):
+        canon_jobj = util.map_keys(jobj, self._canon_key)
+        if not set(canon_jobj).issubset(self._REGISTERED_TYPES):
+            # TODO: acme-spec is not clear about this: 'It is a JSON
+            # dictionary, whose keys are the "resource" values listed
+            # in {{https-requests}}'z
+            raise ValueError('Wrong directory fields')
+        # TODO: check that everything is an absolute URL; acme-spec is
+        # not clear on that
+        self._jobj = canon_jobj
+
+    def __getattr__(self, name):
+        try:
+            return self[name.replace('_', '-')]
+        except KeyError as error:
+            raise AttributeError(str(error))
+
+    def __getitem__(self, name):
+        try:
+            return self._jobj[self._canon_key(name)]
+        except KeyError:
+            raise KeyError('Directory field not found')
+
+    def to_partial_json(self):
+        return self._jobj
+
+    @classmethod
+    def from_json(cls, jobj):
+        try:
+            return cls(jobj)
+        except ValueError as error:
+            raise jose.DeserializationError(str(error))
+
+
 class Resource(jose.JSONObjectWithFields):
     """ACME Resource.
 
@@ -157,6 +195,10 @@ class Registration(ResourceBody):
     :ivar tuple contact: Contact information following ACME spec,
         `tuple` of `unicode`.
     :ivar unicode agreement:
+    :ivar unicode authorizations: URI where
+        `messages.Registration.Authorizations` can be found.
+    :ivar unicode certificates: URI where
+        `messages.Registration.Certificates` can be found.
 
     """
     # on new-reg key server ignores 'key' and populates it based on
@@ -164,6 +206,24 @@ class Registration(ResourceBody):
     key = jose.Field('key', omitempty=True, decoder=jose.JWK.from_json)
     contact = jose.Field('contact', omitempty=True, default=())
     agreement = jose.Field('agreement', omitempty=True)
+    authorizations = jose.Field('authorizations', omitempty=True)
+    certificates = jose.Field('certificates', omitempty=True)
+
+    class Authorizations(jose.JSONObjectWithFields):
+        """Authorizations granted to Account in the process of registration.
+
+        :ivar tuple authorizations: URIs to Authorization Resources.
+
+        """
+        authorizations = jose.Field('authorizations')
+
+    class Certificates(jose.JSONObjectWithFields):
+        """Certificates granted to Account in the process of registration.
+
+        :ivar tuple certificates: URIs to Certificate Resources.
+
+        """
+        certificates = jose.Field('certificates')
 
     phone_prefix = 'tel:'
     email_prefix = 'mailto:'
@@ -194,15 +254,19 @@ class Registration(ResourceBody):
         """All emails found in the ``contact`` field."""
         return self._filter_contact(self.email_prefix)
 
+
+@Directory.register
 class NewRegistration(Registration):
     """New registration."""
     resource_type = 'new-reg'
     resource = fields.Resource(resource_type)
 
+
 class UpdateRegistration(Registration):
     """Update registration."""
     resource_type = 'reg'
     resource = fields.Resource(resource_type)
+
 
 class RegistrationResource(ResourceWithURI):
     """Registration Resource.
@@ -231,7 +295,7 @@ class ChallengeBody(ResourceBody):
         call ``challb.x`` to get ``challb.chall.x`` contents.
     :ivar acme.messages.Status status:
     :ivar datetime.datetime validated:
-    :ivar Error error:
+    :ivar messages.Error error:
 
     """
     __slots__ = ('chall',)
@@ -306,10 +370,13 @@ class Authorization(ResourceBody):
         return tuple(tuple(self.challenges[idx] for idx in combo)
                      for combo in self.combinations)
 
+
+@Directory.register
 class NewAuthorization(Authorization):
     """New authorization."""
     resource_type = 'new-authz'
     resource = fields.Resource(resource_type)
+
 
 class AuthorizationResource(ResourceWithURI):
     """Authorization Resource.
@@ -322,18 +389,17 @@ class AuthorizationResource(ResourceWithURI):
     new_cert_uri = jose.Field('new_cert_uri')
 
 
+@Directory.register
 class CertificateRequest(jose.JSONObjectWithFields):
     """ACME new-cert request.
 
     :ivar acme.jose.util.ComparableX509 csr:
         `OpenSSL.crypto.X509Req` wrapped in `.ComparableX509`
-    :ivar tuple authorizations: `tuple` of URIs (`str`)
 
     """
     resource_type = 'new-cert'
     resource = fields.Resource(resource_type)
     csr = jose.Field('csr', decoder=jose.decode_csr, encoder=jose.encode_csr)
-    authorizations = jose.Field('authorizations', decoder=tuple)
 
 
 class CertificateResource(ResourceWithURI):
@@ -349,6 +415,7 @@ class CertificateResource(ResourceWithURI):
     authzrs = jose.Field('authzrs')
 
 
+@Directory.register
 class Revocation(jose.JSONObjectWithFields):
     """Revocation message.
 
@@ -360,16 +427,3 @@ class Revocation(jose.JSONObjectWithFields):
     resource = fields.Resource(resource_type)
     certificate = jose.Field(
         'certificate', decoder=jose.decode_cert, encoder=jose.encode_cert)
-
-    # TODO: acme-spec#138, this allows only one ACME server instance per domain
-    PATH = '/acme/revoke-cert'
-    """Path to revocation URL, see `url`"""
-
-    @classmethod
-    def url(cls, base):
-        """Get revocation URL.
-
-        :param str base: New Registration Resource or server (root) URL.
-
-        """
-        return urllib_parse.urljoin(base, cls.PATH)

@@ -85,7 +85,7 @@ class ReverterCheckpointLocalTest(unittest.TestCase):
         self.assertEqual(read_in(self.config1), "directive-dir1")
 
     def test_multiple_registration_fail_and_revert(self):
-        # pylint: disable=invalid-name
+
         config3 = os.path.join(self.dir1, "config3.txt")
         update_file(config3, "Config3")
         config4 = os.path.join(self.dir2, "config4.txt")
@@ -173,7 +173,7 @@ class ReverterCheckpointLocalTest(unittest.TestCase):
         self.assertRaises(errors.ReverterError, self.reverter.recovery_routine)
 
     def test_recover_checkpoint_revert_temp_failures(self):
-        # pylint: disable=invalid-name
+
         mock_recover = mock.MagicMock(
             side_effect=errors.ReverterError("e"))
 
@@ -291,7 +291,7 @@ class TestFullCheckpointsReverter(unittest.TestCase):
             errors.ReverterError, self.reverter.rollback_checkpoints, "one")
 
     def test_rollback_finalize_checkpoint_valid_inputs(self):
-        # pylint: disable=invalid-name
+
         config3 = self._setup_three_checkpoints()
 
         # Check resulting backup directory
@@ -334,7 +334,7 @@ class TestFullCheckpointsReverter(unittest.TestCase):
 
     @mock.patch("letsencrypt.reverter.os.rename")
     def test_finalize_checkpoint_no_rename_directory(self, mock_rename):
-        # pylint: disable=invalid-name
+
         self.reverter.add_to_checkpoint(self.sets[0], "perm save")
         mock_rename.side_effect = OSError
 
@@ -343,7 +343,14 @@ class TestFullCheckpointsReverter(unittest.TestCase):
 
     @mock.patch("letsencrypt.reverter.logger")
     def test_rollback_too_many(self, mock_logger):
+        # Test no exist warning...
         self.reverter.rollback_checkpoints(1)
+        self.assertEqual(mock_logger.warning.call_count, 1)
+
+        # Test Generic warning
+        mock_logger.warning.call_count = 0
+        self._setup_three_checkpoints()
+        self.reverter.rollback_checkpoints(4)
         self.assertEqual(mock_logger.warning.call_count, 1)
 
     def test_multi_rollback(self):

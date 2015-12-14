@@ -2,6 +2,7 @@
 import unittest
 
 import mock
+import OpenSSL
 
 from acme import challenges
 from acme import jose
@@ -22,6 +23,10 @@ class NamespaceFunctionsTest(unittest.TestCase):
     def test_dest_namespace(self):
         from letsencrypt.plugins.common import dest_namespace
         self.assertEqual("foo_", dest_namespace("foo"))
+
+    def test_dest_namespace_with_dashes(self):
+        from letsencrypt.plugins.common import dest_namespace
+        self.assertEqual("foo_bar_", dest_namespace("foo-bar"))
 
 
 class PluginTest(unittest.TestCase):
@@ -45,6 +50,9 @@ class PluginTest(unittest.TestCase):
 
     def test_option_namespace(self):
         self.assertEqual("mock-", self.plugin.option_namespace)
+
+    def test_option_name(self):
+        self.assertEqual("mock-foo_bar", self.plugin.option_name("foo_bar"))
 
     def test_dest_namespace(self):
         self.assertEqual("mock_", self.plugin.dest_namespace)
@@ -107,24 +115,24 @@ class AddrTest(unittest.TestCase):
         self.assertEqual(set_a, set_b)
 
 
-class DvsniTest(unittest.TestCase):
-    """Tests for letsencrypt.plugins.common.DvsniTest."""
+class TLSSNI01Test(unittest.TestCase):
+    """Tests for letsencrypt.plugins.common.TLSSNI01."""
 
     auth_key = jose.JWKRSA.load(test_util.load_vector("rsa512_key.pem"))
     achalls = [
-        achallenges.DVSNI(
+        achallenges.KeyAuthorizationAnnotatedChallenge(
             challb=acme_util.chall_to_challb(
-                challenges.DVSNI(token=b'dvsni1'), "pending"),
+                challenges.TLSSNI01(token=b'token1'), "pending"),
             domain="encryption-example.demo", account_key=auth_key),
-        achallenges.DVSNI(
+        achallenges.KeyAuthorizationAnnotatedChallenge(
             challb=acme_util.chall_to_challb(
-                challenges.DVSNI(token=b'dvsni2'), "pending"),
+                challenges.TLSSNI01(token=b'token2'), "pending"),
             domain="letsencrypt.demo", account_key=auth_key),
     ]
 
     def setUp(self):
-        from letsencrypt.plugins.common import Dvsni
-        self.sni = Dvsni(configurator=mock.MagicMock())
+        from letsencrypt.plugins.common import TLSSNI01
+        self.sni = TLSSNI01(configurator=mock.MagicMock())
 
     def test_add_chall(self):
         self.sni.add_chall(self.achalls[0], 0)
@@ -138,9 +146,11 @@ class DvsniTest(unittest.TestCase):
         # http://www.voidspace.org.uk/python/mock/helpers.html#mock.mock_open
         mock_open, mock_safe_open = mock.mock_open(), mock.mock_open()
 
-        response = challenges.DVSNIResponse(validation=mock.Mock())
+        response = challenges.TLSSNI01Response()
         achall = mock.MagicMock()
-        achall.gen_cert_and_response.return_value = (response, "cert", "key")
+        key = test_util.load_pyopenssl_private_key("rsa512_key.pem")
+        achall.response_and_validation.return_value = (
+            response, (test_util.load_cert("cert.pem"), key))
 
         with mock.patch("letsencrypt.plugins.common.open",
                         mock_open, create=True):
@@ -152,10 +162,12 @@ class DvsniTest(unittest.TestCase):
 
         # pylint: disable=no-member
         mock_open.assert_called_once_with(self.sni.get_cert_path(achall), "wb")
-        mock_open.return_value.write.assert_called_once_with("cert")
+        mock_open.return_value.write.assert_called_once_with(
+            test_util.load_vector("cert.pem"))
         mock_safe_open.assert_called_once_with(
             self.sni.get_key_path(achall), "wb", chmod=0o400)
-        mock_safe_open.return_value.write.assert_called_once_with("key")
+        mock_safe_open.return_value.write.assert_called_once_with(
+            OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
 
 
 if __name__ == "__main__":

@@ -34,7 +34,9 @@ def create_le_config(parent_dir):
     os.mkdir(config["work_dir"])
     os.mkdir(config["logs_dir"])
 
-    return argparse.Namespace(**config) # pylint: disable=star-args
+    config["domains"] = None
+
+    return argparse.Namespace(**config)  # pylint: disable=star-args
 
 
 def extract_configs(configs, parent_dir):

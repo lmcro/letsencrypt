@@ -4,11 +4,12 @@ import heapq
 import logging
 import time
 
+import six
 from six.moves import http_client  # pylint: disable=import-error
 
 import OpenSSL
 import requests
-import six
+import sys
 import werkzeug
 
 from acme import errors
@@ -19,8 +20,11 @@ from acme import messages
 
 logger = logging.getLogger(__name__)
 
+# Prior to Python 2.7.9 the stdlib SSL module did not allow a user to configure
+# many important security related options. On these platforms we use PyOpenSSL
+# for SSL, which does allow these options to be configured.
 # https://urllib3.readthedocs.org/en/latest/security.html#insecureplatformwarning
-if six.PY2:
+if sys.version_info < (2, 7, 9):  # pragma: no cover
     requests.packages.urllib3.contrib.pyopenssl.inject_into_urllib3()
 
 
@@ -31,7 +35,7 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
        Clean up raised error types hierarchy, document, and handle (wrap)
        instances of `.DeserializationError` raised in `from_json()`.
 
-    :ivar str new_reg_uri: Location of new-reg
+    :ivar messages.Directory directory:
     :ivar key: `.JWK` (private)
     :ivar alg: `.JWASignature`
     :ivar bool verify_ssl: Verify SSL certificates?
@@ -42,11 +46,22 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
     """
     DER_CONTENT_TYPE = 'application/pkix-cert'
 
-    def __init__(self, new_reg_uri, key, alg=jose.RS256,
-                 verify_ssl=True, net=None):
-        self.new_reg_uri = new_reg_uri
+    def __init__(self, directory, key, alg=jose.RS256, verify_ssl=True,
+                 net=None):
+        """Initialize.
+
+        :param directory: Directory Resource (`.messages.Directory`) or
+            URI from which the resource will be downloaded.
+
+        """
         self.key = key
         self.net = ClientNetwork(key, alg, verify_ssl) if net is None else net
+
+        if isinstance(directory, six.string_types):
+            self.directory = messages.Directory.from_json(
+                self.net.get(directory).json())
+        else:
+            self.directory = directory
 
     @classmethod
     def _regr_from_response(cls, response, uri=None, new_authzr_uri=None,
@@ -81,7 +96,7 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         new_reg = messages.NewRegistration() if new_reg is None else new_reg
         assert isinstance(new_reg, messages.NewRegistration)
 
-        response = self.net.post(self.new_reg_uri, new_reg)
+        response = self.net.post(self.directory[new_reg], new_reg)
         # TODO: handle errors
         assert response.status_code == http_client.CREATED
 
@@ -94,18 +109,8 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
 
         return regr
 
-    def update_registration(self, regr):
-        """Update registration.
-
-        :pram regr: Registration Resource.
-        :type regr: `.RegistrationResource`
-
-        :returns: Updated Registration Resource.
-        :rtype: `.RegistrationResource`
-
-        """
-        response = self.net.post(
-            regr.uri, messages.UpdateRegistration(**dict(regr.body)))
+    def _send_recv_regr(self, regr, body):
+        response = self.net.post(regr.uri, body)
 
         # TODO: Boulder returns httplib.ACCEPTED
         #assert response.status_code == httplib.OK
@@ -113,12 +118,36 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         # TODO: Boulder does not set Location or Link on update
         # (c.f. acme-spec #94)
 
-        updated_regr = self._regr_from_response(
+        return self._regr_from_response(
             response, uri=regr.uri, new_authzr_uri=regr.new_authzr_uri,
             terms_of_service=regr.terms_of_service)
+
+    def update_registration(self, regr, update=None):
+        """Update registration.
+
+        :param messages.RegistrationResource regr: Registration Resource.
+        :param messages.Registration update: Updated body of the
+            resource. If not provided, body will be taken from `regr`.
+
+        :returns: Updated Registration Resource.
+        :rtype: `.RegistrationResource`
+
+        """
+        update = regr.body if update is None else update
+        updated_regr = self._send_recv_regr(
+            regr, body=messages.UpdateRegistration(**dict(update)))
         if updated_regr != regr:
             raise errors.UnexpectedUpdate(regr)
         return updated_regr
+
+    def query_registration(self, regr):
+        """Query server about registration.
+
+        :param messages.RegistrationResource: Existing Registration
+            Resource.
+
+        """
+        return self._send_recv_regr(regr, messages.UpdateRegistration())
 
     def agree_to_tos(self, regr):
         """Agree to the terms-of-service.
@@ -219,9 +248,7 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
     def retry_after(cls, response, default):
         """Compute next `poll` time based on response ``Retry-After`` header.
 
-        :param response: Response from `poll`.
-        :type response: `requests.Response`
-
+        :param requests.Response response: Response from `poll`.
         :param int default: Default value (in seconds), used when
             ``Retry-After`` header is not present or invalid.
 
@@ -275,8 +302,7 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         logger.debug("Requesting issuance...")
 
         # TODO: assert len(authzrs) == number of SANs
-        req = messages.CertificateRequest(
-            csr=csr, authorizations=tuple(authzr.uri for authzr in authzrs))
+        req = messages.CertificateRequest(csr=csr)
 
         content_type = self.DER_CONTENT_TYPE  # TODO: add 'cert_type 'argument
         response = self.net.post(
@@ -297,30 +323,32 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
             body=jose.ComparableX509(OpenSSL.crypto.load_certificate(
                 OpenSSL.crypto.FILETYPE_ASN1, response.content)))
 
-    def poll_and_request_issuance(self, csr, authzrs, mintime=5):
+    def poll_and_request_issuance(
+            self, csr, authzrs, mintime=5, max_attempts=10):
         """Poll and request issuance.
 
         This function polls all provided Authorization Resource URIs
         until all challenges are valid, respecting ``Retry-After`` HTTP
         headers, and then calls `request_issuance`.
 
-        .. todo:: add `max_attempts` or `timeout`
-
-        :param csr: CSR.
-        :type csr: `OpenSSL.crypto.X509Req` wrapped in `.ComparableX509`
-
+        :param .ComparableX509 csr: CSR (`OpenSSL.crypto.X509Req`
+            wrapped in `.ComparableX509`)
         :param authzrs: `list` of `.AuthorizationResource`
-
         :param int mintime: Minimum time before next attempt, used if
             ``Retry-After`` is not present in the response.
+        :param int max_attempts: Maximum number of attempts before
+            `PollError` with non-empty ``waiting`` is raised.
 
         :returns: ``(cert, updated_authzrs)`` `tuple` where ``cert`` is
-            the issued certificate (`.messages.CertificateResource.),
+            the issued certificate (`.messages.CertificateResource`),
             and ``updated_authzrs`` is a `tuple` consisting of updated
             Authorization Resources (`.AuthorizationResource`) as
             present in the responses from server, and in the same order
             as the input ``authzrs``.
         :rtype: `tuple`
+
+        :raises PollError: in case of timeout or if some authorization
+            was marked by the CA as invalid
 
         """
         # priority queue with datetime (based on Retry-After) as key,
@@ -330,7 +358,8 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         # recently updated one
         updated = dict((authzr, authzr) for authzr in authzrs)
 
-        while waiting:
+        while waiting and max_attempts:
+            max_attempts -= 1
             # find the smallest Retry-After, and sleep if necessary
             when, authzr = heapq.heappop(waiting)
             now = datetime.datetime.now()
@@ -345,10 +374,15 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
             updated[authzr] = updated_authzr
 
             # pylint: disable=no-member
-            if updated_authzr.body.status != messages.STATUS_VALID:
+            if updated_authzr.body.status not in (
+                    messages.STATUS_VALID, messages.STATUS_INVALID):
                 # push back to the priority queue, with updated retry_after
                 heapq.heappush(waiting, (self.retry_after(
                     response, default=mintime), authzr))
+
+        if not max_attempts or any(authzr.body.status == messages.STATUS_INVALID
+                                   for authzr in six.itervalues(updated)):
+            raise errors.PollError(waiting, updated)
 
         updated_authzrs = tuple(updated[authzr] for authzr in authzrs)
         return self.request_issuance(csr, updated_authzrs), updated_authzrs
@@ -403,20 +437,34 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         # respond with status code 403 (Forbidden)
         return self.check_cert(certr)
 
-    def fetch_chain(self, certr):
+    def fetch_chain(self, certr, max_length=10):
         """Fetch chain for certificate.
 
-        :param certr: Certificate Resource
-        :type certr: `.CertificateResource`
+        :param .CertificateResource certr: Certificate Resource
+        :param int max_length: Maximum allowed length of the chain.
+            Note that each element in the certificate requires new
+            ``HTTP GET`` request, and the length of the chain is
+            controlled by the ACME CA.
 
-        :returns: Certificate chain, or `None` if no "up" Link was provided.
-        :rtype: `OpenSSL.crypto.X509` wrapped in `.ComparableX509`
+        :raises errors.Error: if recursion exceeds `max_length`
+
+        :returns: Certificate chain for the Certificate Resource. It is
+            a list ordered so that the first element is a signer of the
+            certificate from Certificate Resource. Will be empty if
+            ``cert_chain_uri`` is ``None``.
+        :rtype: `list` of `OpenSSL.crypto.X509` wrapped in `.ComparableX509`
 
         """
-        if certr.cert_chain_uri is not None:
-            return self._get_cert(certr.cert_chain_uri)[1]
-        else:
-            return None
+        chain = []
+        uri = certr.cert_chain_uri
+        while uri is not None and len(chain) < max_length:
+            response, cert = self._get_cert(uri)
+            uri = response.links.get('up', {}).get('url')
+            chain.append(cert)
+        if uri is not None:
+            raise errors.Error(
+                "Recursion limit reached. Didn't get {0}".format(uri))
+        return chain
 
     def revoke(self, cert):
         """Revoke certificate.
@@ -427,8 +475,9 @@ class Client(object):  # pylint: disable=too-many-instance-attributes
         :raises .ClientError: If revocation is unsuccessful.
 
         """
-        response = self.net.post(messages.Revocation.url(self.new_reg_uri),
-                                 messages.Revocation(certificate=cert))
+        response = self.net.post(self.directory[messages.Revocation],
+                                 messages.Revocation(certificate=cert),
+                                 content_type=None)
         if response.status_code != http_client.OK:
             raise errors.ClientError(
                 'Successful revocation must return HTTP OK status')
@@ -440,11 +489,13 @@ class ClientNetwork(object):
     JSON_ERROR_CONTENT_TYPE = 'application/problem+json'
     REPLAY_NONCE_HEADER = 'Replay-Nonce'
 
-    def __init__(self, key, alg=jose.RS256, verify_ssl=True):
+    def __init__(self, key, alg=jose.RS256, verify_ssl=True,
+                 user_agent='acme-python'):
         self.key = key
         self.alg = alg
         self.verify_ssl = verify_ssl
         self._nonces = set()
+        self.user_agent = user_agent
 
     def _wrap_in_jws(self, obj, nonce):
         """Wrap `JSONDeSerializable` object in JWS.
@@ -534,8 +585,11 @@ class ClientNetwork(object):
 
 
         """
-        logging.debug('Sending %s request to %s', method, url)
+        logging.debug('Sending %s request to %s. args: %r, kwargs: %r',
+                      method, url, args, kwargs)
         kwargs['verify'] = self.verify_ssl
+        kwargs.setdefault('headers', {})
+        kwargs['headers'].setdefault('User-Agent', self.user_agent)
         response = requests.request(method, url, *args, **kwargs)
         logging.debug('Received %s. Headers: %s. Content: %r',
                       response, response.headers, response.content)
@@ -545,7 +599,7 @@ class ClientNetwork(object):
         """Send HEAD request without checking the response.
 
         Note, that `_check_response` is not called, as it is expected
-        that status code other than successfuly 2xx will be returned, or
+        that status code other than successfully 2xx will be returned, or
         messages2.Error will be raised by the server.
 
         """

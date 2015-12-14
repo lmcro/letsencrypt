@@ -76,7 +76,7 @@ class NcursesDisplay(object):
             "help_label": help_label,
             "width": self.width,
             "height": self.height,
-            "menu_height": self.height-6,
+            "menu_height": self.height - 6,
         }
 
         # Can accept either tuples or just the actual choices
@@ -104,6 +104,7 @@ class NcursesDisplay(object):
 
             return code, int(tag) - 1
 
+
     def input(self, message):
         """Display an input box to the user.
 
@@ -114,7 +115,12 @@ class NcursesDisplay(object):
             `string` - input entered by the user
 
         """
-        return self.dialog.inputbox(message, width=self.width)
+        sections = message.split("\n")
+        # each section takes at least one line, plus extras if it's longer than self.width
+        wordlines = [1 + (len(section)/self.width) for section in sections]
+        height = 6 + sum(wordlines) + len(sections)
+        return self.dialog.inputbox(message, width=self.width, height=height)
+
 
     def yesno(self, message, yes_label="Yes", no_label="No"):
         """Display a Yes/No dialog box.
@@ -315,7 +321,7 @@ class FileDisplay(object):
             if index < 1 or index > len(tags):
                 return []
         # Transform indices to appropriate tags
-        return [tags[index-1] for index in indices]
+        return [tags[index - 1] for index in indices]
 
     def _print_menu(self, message, choices):
         """Print a menu on the screen.

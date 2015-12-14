@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 
+import OpenSSL
 import zope.interface
 
 from acme.jose import util as jose_util
@@ -18,14 +19,15 @@ def option_namespace(name):
     """ArgumentParser options namespace (prefix of all options)."""
     return name + "-"
 
+
 def dest_namespace(name):
     """ArgumentParser dest namespace (prefix of all destinations)."""
-    return name + "_"
+    return name.replace("-", "_") + "_"
 
-private_ips_regex = re.compile(  # pylint: disable=invalid-name
+private_ips_regex = re.compile(
     r"(^127\.0\.0\.1)|(^10\.)|(^172\.1[6-9]\.)|"
     r"(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^192\.168\.)")
-hostname_regex = re.compile(  # pylint: disable=invalid-name
+hostname_regex = re.compile(
     r"^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*[a-z]+$", re.IGNORECASE)
 
 
@@ -43,6 +45,10 @@ class Plugin(object):
     def option_namespace(self):
         """ArgumentParser options namespace (prefix of all options)."""
         return option_namespace(self.name)
+
+    def option_name(self, name):
+        """Option name (include plugin namespace)."""
+        return self.option_namespace + name
 
     @property
     def dest_namespace(self):
@@ -86,6 +92,7 @@ class Plugin(object):
 
 # other
 
+
 class Addr(object):
     r"""Represents an virtual host address.
 
@@ -128,22 +135,22 @@ class Addr(object):
         return self.__class__((self.tup[0], port))
 
 
-class Dvsni(object):
-    """Class that perform DVSNI challenges."""
+class TLSSNI01(object):
+    """Abstract base for TLS-SNI-01 challenge performers"""
 
     def __init__(self, configurator):
         self.configurator = configurator
         self.achalls = []
         self.indices = []
         self.challenge_conf = os.path.join(
-            configurator.config.config_dir, "le_dvsni_cert_challenge.conf")
+            configurator.config.config_dir, "le_tls_sni_01_cert_challenge.conf")
         # self.completed = 0
 
     def add_chall(self, achall, idx=None):
-        """Add challenge to DVSNI object to perform at once.
+        """Add challenge to TLSSNI01 object to perform at once.
 
-        :param achall: Annotated DVSNI challenge.
-        :type achall: :class:`letsencrypt.achallenges.DVSNI`
+        :param .KeyAuthorizationAnnotatedChallenge achall: Annotated
+            TLSSNI01 challenge.
 
         :param int idx: index to challenge in a larger array
 
@@ -155,8 +162,8 @@ class Dvsni(object):
     def get_cert_path(self, achall):
         """Returns standardized name for challenge certificate.
 
-        :param achall: Annotated DVSNI challenge.
-        :type achall: :class:`letsencrypt.achallenges.DVSNI`
+        :param .KeyAuthorizationAnnotatedChallenge achall: Annotated
+            tls-sni-01 challenge.
 
         :returns: certificate file name
         :rtype: str
@@ -170,8 +177,8 @@ class Dvsni(object):
         return os.path.join(self.configurator.config.work_dir,
                             achall.chall.encode("token") + '.pem')
 
-    def _setup_challenge_cert(self, achall, s=None):
-        # pylint: disable=invalid-name
+    def _setup_challenge_cert(self, achall, cert_key=None):
+
         """Generate and write out challenge certificate."""
         cert_path = self.get_cert_path(achall)
         key_path = self.get_key_path(achall)
@@ -179,7 +186,12 @@ class Dvsni(object):
         self.configurator.reverter.register_file_creation(True, key_path)
         self.configurator.reverter.register_file_creation(True, cert_path)
 
-        response, cert_pem, key_pem = achall.gen_cert_and_response(s)
+        response, (cert, key) = achall.response_and_validation(
+            cert_key=cert_key)
+        cert_pem = OpenSSL.crypto.dump_certificate(
+            OpenSSL.crypto.FILETYPE_PEM, cert)
+        key_pem = OpenSSL.crypto.dump_privatekey(
+            OpenSSL.crypto.FILETYPE_PEM, key)
 
         # Write out challenge cert and key
         with open(cert_path, "wb") as cert_chall_fd:

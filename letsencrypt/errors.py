@@ -57,13 +57,21 @@ class DvAuthError(AuthorizationError):
 
 
 # Authenticator - Challenge specific errors
-class DvsniError(DvAuthError):
-    """Let's Encrypt DVSNI error."""
+class TLSSNI01Error(DvAuthError):
+    """Let's Encrypt TLSSNI01 error."""
 
 
 # Plugin Errors
 class PluginError(Error):
     """Let's Encrypt Plugin error."""
+
+
+class PluginEnhancementAlreadyPresent(Error):
+    """ Enhancement was already set """
+
+
+class PluginSelectionError(Error):
+    """A problem with plugin/configurator selection or setup"""
 
 
 class NoInstallationError(PluginError):
@@ -73,9 +81,24 @@ class NoInstallationError(PluginError):
 class MisconfigurationError(PluginError):
     """Let's Encrypt Misconfiguration error."""
 
+
 class NotSupportedError(PluginError):
     """Let's Encrypt Plugin function not supported error."""
 
 
 class RevokerError(Error):
     """Let's Encrypt Revoker error."""
+
+
+class StandaloneBindError(Error):
+    """Standalone plugin bind error."""
+
+    def __init__(self, socket_error, port):
+        super(StandaloneBindError, self).__init__(
+            "Problem binding to port {0}: {1}".format(port, socket_error))
+        self.socket_error = socket_error
+        self.port = port
+
+
+class ConfigurationError(Error):
+    """Configuration sanity error."""

@@ -31,7 +31,8 @@ class Reverter(object):
         self.config = config
 
         le_util.make_or_verify_dir(
-            config.backup_dir, constants.CONFIG_DIRS_MODE, os.geteuid())
+            config.backup_dir, constants.CONFIG_DIRS_MODE, os.geteuid(),
+            self.config.strict_permissions)
 
     def revert_temporary_config(self):
         """Reload users original configuration files after a temporary save.
@@ -75,7 +76,11 @@ class Reverter(object):
         backups = os.listdir(self.config.backup_dir)
         backups.sort()
 
-        if len(backups) < rollback:
+        if not backups:
+            logger.warning(
+                "Let's Encrypt hasn't modified your configuration, so rollback "
+                "isn't available.")
+        elif len(backups) < rollback:
             logger.warning("Unable to rollback %d checkpoints, only %d exist",
                            rollback, len(backups))
 
@@ -176,7 +181,8 @@ class Reverter(object):
 
         """
         le_util.make_or_verify_dir(
-            cp_dir, constants.CONFIG_DIRS_MODE, os.geteuid())
+            cp_dir, constants.CONFIG_DIRS_MODE, os.geteuid(),
+            self.config.strict_permissions)
 
         op_fd, existing_filepaths = self._read_and_append(
             os.path.join(cp_dir, "FILEPATHS"))
@@ -389,7 +395,8 @@ class Reverter(object):
             cp_dir = self.config.in_progress_dir
 
         le_util.make_or_verify_dir(
-            cp_dir, constants.CONFIG_DIRS_MODE, os.geteuid())
+            cp_dir, constants.CONFIG_DIRS_MODE, os.geteuid(),
+            self.config.strict_permissions)
 
         return cp_dir
 

@@ -142,7 +142,7 @@ class IAuthenticator(IPlugin):
 
         :param str domain: Domain for which challenge preferences are sought.
 
-        :returns: List of challege types (subclasses of
+        :returns: List of challenge types (subclasses of
             :class:`acme.challenges.Challenge`) with the most
             preferred challenges first. If a type is not specified, it means the
             Authenticator cannot perform the challenge.
@@ -194,8 +194,7 @@ class IConfig(zope.interface.Interface):
         filtered, stripped or sanitized.
 
     """
-    server = zope.interface.Attribute(
-        "ACME new registration URI (including /acme/new-reg).")
+    server = zope.interface.Attribute("ACME Directory Resource URI.")
     email = zope.interface.Attribute(
         "Email used for registration and recovery contact.")
     rsa_key_size = zope.interface.Attribute("Size of the RSA key.")
@@ -206,12 +205,9 @@ class IConfig(zope.interface.Interface):
     accounts_dir = zope.interface.Attribute(
         "Directory where all account information is stored.")
     backup_dir = zope.interface.Attribute("Configuration backups directory.")
-    cert_dir = zope.interface.Attribute(
+    csr_dir = zope.interface.Attribute(
         "Directory where newly generated Certificate Signing Requests "
-        "(CSRs) and certificates not enrolled in the renewer are saved.")
-    cert_key_backup = zope.interface.Attribute(
-        "Directory where all certificates and keys are stored. "
-        "Used for easy revocation.")
+        "(CSRs) are saved.")
     in_progress_dir = zope.interface.Attribute(
         "Directory used before a permanent checkpoint is finalized.")
     key_dir = zope.interface.Attribute("Keys storage.")
@@ -223,13 +219,11 @@ class IConfig(zope.interface.Interface):
 
     no_verify_ssl = zope.interface.Attribute(
         "Disable SSL certificate verification.")
-    dvsni_port = zope.interface.Attribute(
-        "Port number to perform DVSNI challenge. "
+    tls_sni_01_port = zope.interface.Attribute(
+        "Port number to perform tls-sni-01 challenge. "
         "Boulder in testing mode defaults to 5001.")
 
-    no_simple_http_tls = zope.interface.Attribute(
-        "Do not use TLS when solving SimpleHTTP challenges.")
-    simple_http_port = zope.interface.Attribute(
+    http01_port = zope.interface.Attribute(
         "Port used in the SimpleHttp challenge.")
 
 
@@ -247,13 +241,15 @@ class IInstaller(IPlugin):
 
         """
 
-    def deploy_cert(domain, cert_path, key_path, chain_path=None):
+    def deploy_cert(domain, cert_path, key_path, chain_path, fullchain_path):
         """Deploy certificate.
 
         :param str domain: domain to deploy certificate file
         :param str cert_path: absolute path to the certificate file
         :param str key_path: absolute path to the private key file
         :param str chain_path: absolute path to the certificate chain file
+        :param str fullchain_path: absolute path to the certificate fullchain
+            file (cert plus chain)
 
         :raises .PluginError: when cert cannot be deployed
 
@@ -302,7 +298,8 @@ class IInstaller(IPlugin):
 
         Both title and temporary are needed because a save may be
         intended to be permanent, but the save is not ready to be a full
-        checkpoint
+        checkpoint. If an exception is raised, it is assumed a new
+        checkpoint was not created.
 
         :param str title: The title of the save. If a title is given, the
             configuration will be saved as a new checkpoint and put in a
@@ -319,6 +316,17 @@ class IInstaller(IPlugin):
         """Revert `rollback` number of configuration checkpoints.
 
         :raises .PluginError: when configuration cannot be fully reverted
+
+        """
+
+    def recovery_routine():
+        """Revert configuration to most recent finalized checkpoint.
+
+        Remove all changes (temporary and permanent) that have not been
+        finalized. This is useful to protect against crashes and other
+        execution interruptions.
+
+        :raises .errors.PluginError: If unable to recover the configuration
 
         """
 
@@ -440,7 +448,6 @@ class IValidator(zope.interface.Interface):
 
         """
 
-
     def hsts(name):
         """Verify HSTS header is enabled
 
@@ -472,7 +479,7 @@ class IReporter(zope.interface.Interface):
     LOW_PRIORITY = zope.interface.Attribute(
         "Used to denote low priority messages")
 
-    def add_message(self, msg, priority, on_crash=False):
+    def add_message(self, msg, priority, on_crash=True):
         """Adds msg to the list of messages to be printed.
 
         :param str msg: Message to be displayed to the user.

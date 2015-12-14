@@ -4,6 +4,7 @@ import os
 
 import zope.component
 
+from letsencrypt import errors
 from letsencrypt import interfaces
 from letsencrypt import le_util
 from letsencrypt.display import util as display_util
@@ -12,11 +13,11 @@ from letsencrypt.display import util as display_util
 logger = logging.getLogger(__name__)
 
 # Define a helper function to avoid verbose code
-util = zope.component.getUtility  # pylint: disable=invalid-name
+util = zope.component.getUtility
 
 
 def choose_plugin(prepared, question):
-    """Allow the user to choose ther plugin.
+    """Allow the user to choose their plugin.
 
     :param list prepared: List of `~.PluginEntryPoint`.
     :param str question: Question to be presented to the user.
@@ -25,8 +26,8 @@ def choose_plugin(prepared, question):
     :rtype: `~.PluginEntryPoint`
 
     """
-    opts = [plugin_ep.description_with_name
-            + (" [Misconfigured]" if plugin_ep.misconfigured else "")
+    opts = [plugin_ep.description_with_name +
+            (" [Misconfigured]" if plugin_ep.misconfigured else "")
             for plugin_ep in prepared]
 
     while True:
@@ -34,7 +35,15 @@ def choose_plugin(prepared, question):
             question, opts, help_label="More Info")
 
         if code == display_util.OK:
-            return prepared[index]
+            plugin_ep = prepared[index]
+            if plugin_ep.misconfigured:
+                util(interfaces.IDisplay).notification(
+                    "The selected plugin encountered an error while parsing "
+                    "your server configuration and cannot be used. The error "
+                    "was:\n\n{0}".format(plugin_ep.prepare()),
+                    height=display_util.HEIGHT, pause=False)
+            else:
+                return plugin_ep
         elif code == display_util.HELP:
             if prepared[index].misconfigured:
                 msg = "Reported Error: %s" % prepared[index].prepare()
@@ -65,7 +74,7 @@ def pick_plugin(config, default, plugins, question, ifaces):
         # throw more UX-friendly error if default not in plugins
         filtered = plugins.filter(lambda p_ep: p_ep.name == default)
     else:
-        filtered = plugins.ifaces(ifaces)
+        filtered = plugins.visible().ifaces(ifaces)
 
     filtered.init(config)
     verified = filtered.verify(ifaces)
@@ -114,23 +123,36 @@ def pick_configurator(
         config, default, plugins, question,
         (interfaces.IAuthenticator, interfaces.IInstaller))
 
-
-def get_email():
+def get_email(more=False, invalid=False):
     """Prompt for valid email address.
+
+    :param bool more: explain why the email is strongly advisable, but how to
+        skip it
+    :param bool invalid: true if the user just typed something, but it wasn't
+        a valid-looking email
 
     :returns: Email or ``None`` if cancelled by user.
     :rtype: str
 
     """
-    while True:
-        code, email = zope.component.getUtility(interfaces.IDisplay).input(
-            "Enter email address")
+    msg = "Enter email address (used for urgent notices and lost key recovery)"
+    if invalid:
+        msg = "There seem to be problems with that address. " + msg
+    if more:
+        msg += ('\n\nIf you really want to skip this, you can run the client with '
+                '--register-unsafely-without-email but make sure you backup your '
+                'account key from /etc/letsencrypt/accounts\n\n')
+    code, email = zope.component.getUtility(interfaces.IDisplay).input(msg)
 
-        if code == display_util.OK:
-            if le_util.safe_email(email):
-                return email
+    if code == display_util.OK:
+        if le_util.safe_email(email):
+            return email
         else:
-            return None
+            # TODO catch the server's ACME invalid email address error, and
+            # make a similar call when that happens
+            return get_email(more=True, invalid=(email != ""))
+    else:
+        return None
 
 
 def choose_account(accounts):
@@ -165,7 +187,8 @@ def choose_names(installer):
         logger.debug("No installer, picking names manually")
         return _choose_names_manually()
 
-    names = list(installer.get_all_names())
+    domains = list(installer.get_all_names())
+    names = get_valid_domains(domains)
 
     if not names:
         manual = util(interfaces.IDisplay).yesno(
@@ -186,6 +209,22 @@ def choose_names(installer):
     else:
         return []
 
+def get_valid_domains(domains):
+    """Helper method for choose_names that implements basic checks
+     on domain names
+
+    :param list domains: Domain names to validate
+    :return: List of valid domains
+    :rtype: list
+    """
+    valid_domains = []
+    for domain in domains:
+        try:
+            le_util.check_domain_sanity(domain)
+            valid_domains.append(domain)
+        except errors.ConfigurationError:
+            continue
+    return valid_domains
 
 def _filter_names(names):
     """Determine which names the user would like to select from a list.
@@ -224,12 +263,32 @@ def success_installation(domains):
 
     """
     util(interfaces.IDisplay).notification(
-        "Congratulations! You have successfully enabled {0}!{1}{1}"
+        "Congratulations! You have successfully enabled {0}{1}{1}"
         "You should test your configuration at:{1}{2}".format(
             _gen_https_names(domains),
             os.linesep,
             os.linesep.join(_gen_ssl_lab_urls(domains))),
         height=(10 + len(domains)),
+        pause=False)
+
+
+def success_renewal(domains):
+    """Display a box confirming the renewal of an existing certificate.
+
+    .. todo:: This should be centered on the screen
+
+    :param list domains: domain names which were renewed
+
+    """
+    util(interfaces.IDisplay).notification(
+        "Your existing certificate has been successfully renewed, and the "
+        "new certificate has been installed.{1}{1}"
+        "The new certificate covers the following domains: {0}{1}{1}"
+        "You should test your configuration at:{1}{2}".format(
+            _gen_https_names(domains),
+            os.linesep,
+            os.linesep.join(_gen_ssl_lab_urls(domains))),
+        height=(14 + len(domains)),
         pause=False)
 
 

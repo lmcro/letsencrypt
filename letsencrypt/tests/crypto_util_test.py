@@ -6,12 +6,16 @@ import unittest
 
 import OpenSSL
 import mock
+import zope.component
 
+from letsencrypt import errors
+from letsencrypt import interfaces
 from letsencrypt.tests import test_util
 
 
 RSA256_KEY = test_util.load_vector('rsa256_key.pem')
 RSA512_KEY = test_util.load_vector('rsa512_key.pem')
+CERT_PATH = test_util.vector_path('cert.pem')
 CERT = test_util.load_vector('cert.pem')
 SAN_CERT = test_util.load_vector('cert-san.pem')
 
@@ -20,6 +24,8 @@ class InitSaveKeyTest(unittest.TestCase):
     """Tests for letsencrypt.crypto_util.init_save_key."""
     def setUp(self):
         logging.disable(logging.CRITICAL)
+        zope.component.provideUtility(
+            mock.Mock(strict_permissions=True), interfaces.IConfig)
         self.key_dir = tempfile.mkdtemp('key_dir')
 
     def tearDown(self):
@@ -48,6 +54,8 @@ class InitSaveCSRTest(unittest.TestCase):
     """Tests for letsencrypt.crypto_util.init_save_csr."""
 
     def setUp(self):
+        zope.component.provideUtility(
+            mock.Mock(strict_permissions=True), interfaces.IConfig)
         self.csr_dir = tempfile.mkdtemp('csr_dir')
 
     def tearDown(self):
@@ -205,6 +213,41 @@ class GetSANsFromCSRTest(unittest.TestCase):
     def test_parse_no_sans(self):
         self.assertEqual(
             [], self._call(test_util.load_vector('csr-nosans.pem')))
+
+
+class CertLoaderTest(unittest.TestCase):
+    """Tests for letsencrypt.crypto_util.pyopenssl_load_certificate"""
+
+    def test_load_valid_cert(self):
+        from letsencrypt.crypto_util import pyopenssl_load_certificate
+
+        cert, file_type = pyopenssl_load_certificate(CERT)
+        self.assertEqual(cert.digest('sha1'),
+                         OpenSSL.crypto.load_certificate(file_type, CERT).digest('sha1'))
+
+    def test_load_invalid_cert(self):
+        from letsencrypt.crypto_util import pyopenssl_load_certificate
+        bad_cert_data = CERT.replace("BEGIN CERTIFICATE", "ASDFASDFASDF!!!")
+        self.assertRaises(
+            errors.Error, pyopenssl_load_certificate, bad_cert_data)
+
+
+class NotBeforeTest(unittest.TestCase):
+    """Tests for letsencrypt.crypto_util.notBefore"""
+
+    def test_notBefore(self):
+        from letsencrypt.crypto_util import notBefore
+        self.assertEqual(notBefore(CERT_PATH).isoformat(),
+                         '2014-12-11T22:34:45+00:00')
+
+
+class NotAfterTest(unittest.TestCase):
+    """Tests for letsencrypt.crypto_util.notAfter"""
+
+    def test_notAfter(self):
+        from letsencrypt.crypto_util import notAfter
+        self.assertEqual(notAfter(CERT_PATH).isoformat(),
+                         '2014-12-18T22:34:45+00:00')
 
 
 if __name__ == '__main__':

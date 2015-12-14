@@ -37,8 +37,16 @@ class TwoVhost80Test(util.ApacheTest):
         shutil.rmtree(self.config_dir)
         shutil.rmtree(self.work_dir)
 
+    @mock.patch("letsencrypt_apache.configurator.le_util.exe_exists")
+    def test_prepare_no_install(self, mock_exe_exists):
+        mock_exe_exists.return_value = False
+        self.assertRaises(
+            errors.NoInstallationError, self.config.prepare)
+
     @mock.patch("letsencrypt_apache.parser.ApacheParser")
-    def test_prepare_version(self, _):
+    @mock.patch("letsencrypt_apache.configurator.le_util.exe_exists")
+    def test_prepare_version(self, mock_exe_exists, _):
+        mock_exe_exists.return_value = True
         self.config.version = None
         self.config.config_test = mock.Mock()
         self.config.get_version = mock.Mock(return_value=(1, 1))
@@ -51,14 +59,20 @@ class TwoVhost80Test(util.ApacheTest):
         # Weak test..
         ApacheConfigurator.add_parser_arguments(mock.MagicMock())
 
-    def test_get_all_names(self):
+    @mock.patch("zope.component.getUtility")
+    def test_get_all_names(self, mock_getutility):
+        mock_getutility.notification = mock.MagicMock(return_value=True)
         names = self.config.get_all_names()
         self.assertEqual(names, set(
             ["letsencrypt.demo", "encryption-example.demo", "ip-172-30-0-17"]))
 
+    @mock.patch("zope.component.getUtility")
     @mock.patch("letsencrypt_apache.configurator.socket.gethostbyaddr")
-    def test_get_all_names_addrs(self, mock_gethost):
+    def test_get_all_names_addrs(self, mock_gethost, mock_getutility):
         mock_gethost.side_effect = [("google.com", "", ""), socket.error]
+        notification = mock.Mock()
+        notification.notification = mock.Mock(return_value=True)
+        mock_getutility.return_value = notification
         vhost = obj.VirtualHost(
             "fp", "ap",
             set([obj.Addr(("8.8.8.8", "443")),
@@ -89,7 +103,7 @@ class TwoVhost80Test(util.ApacheTest):
 
         """
         vhs = self.config.get_virtual_hosts()
-        self.assertEqual(len(vhs), 4)
+        self.assertEqual(len(vhs), 6)
         found = 0
 
         for vhost in vhs:
@@ -100,7 +114,7 @@ class TwoVhost80Test(util.ApacheTest):
             else:
                 raise Exception("Missed: %s" % vhost)  # pragma: no cover
 
-        self.assertEqual(found, 4)
+        self.assertEqual(found, 6)
 
     @mock.patch("letsencrypt_apache.display_ops.select_vhost")
     def test_choose_vhost_none_avail(self, mock_select):
@@ -124,6 +138,12 @@ class TwoVhost80Test(util.ApacheTest):
         # Make sure we go from HTTP -> HTTPS
         self.assertFalse(self.vh_truth[0].ssl)
         self.assertTrue(chosen_vhost.ssl)
+
+    @mock.patch("letsencrypt_apache.display_ops.select_vhost")
+    def test_choose_vhost_select_vhost_with_temp(self, mock_select):
+        mock_select.return_value = self.vh_truth[0]
+        chosen_vhost = self.config.choose_vhost("none.com", temp=True)
+        self.assertEqual(self.vh_truth[0], chosen_vhost)
 
     @mock.patch("letsencrypt_apache.display_ops.select_vhost")
     def test_choose_vhost_select_vhost_conflicting_non_ssl(self, mock_select):
@@ -166,7 +186,7 @@ class TwoVhost80Test(util.ApacheTest):
 
     def test_non_default_vhosts(self):
         # pylint: disable=protected-access
-        self.assertEqual(len(self.config._non_default_vhosts()), 3)
+        self.assertEqual(len(self.config._non_default_vhosts()), 4)
 
     def test_is_site_enabled(self):
         """Test if site is enabled.
@@ -207,20 +227,11 @@ class TwoVhost80Test(util.ApacheTest):
         self.assertRaises(
             errors.MisconfigurationError, self.config.enable_mod, "ssl")
 
-    @mock.patch("letsencrypt.le_util.run_script")
-    @mock.patch("letsencrypt.le_util.exe_exists")
-    @mock.patch("letsencrypt_apache.parser.subprocess.Popen")
-    def test_enable_site(self, mock_popen, mock_exe_exists, mock_run_script):
-        mock_popen().returncode = 0
-        mock_popen().communicate.return_value = ("Define: DUMP_RUN_CFG", "")
-        mock_exe_exists.return_value = True
-
+    def test_enable_site(self):
         # Default 443 vhost
         self.assertFalse(self.vh_truth[1].enabled)
         self.config.enable_site(self.vh_truth[1])
         self.assertTrue(self.vh_truth[1].enabled)
-        # Mod enabled
-        self.assertTrue(mock_run_script.called)
 
         # Go again to make sure nothing fails
         self.config.enable_site(self.vh_truth[1])
@@ -230,6 +241,64 @@ class TwoVhost80Test(util.ApacheTest):
             errors.NotSupportedError,
             self.config.enable_site,
             obj.VirtualHost("asdf", "afsaf", set(), False, False))
+
+    def test_deploy_cert_newssl(self):
+        self.config = util.get_apache_configurator(
+            self.config_path, self.config_dir, self.work_dir, version=(2, 4, 16))
+
+        self.config.parser.modules.add("ssl_module")
+        self.config.parser.modules.add("mod_ssl.c")
+
+        # Get the default 443 vhost
+        self.config.assoc["random.demo"] = self.vh_truth[1]
+        self.config.deploy_cert(
+            "random.demo", "example/cert.pem", "example/key.pem",
+            "example/cert_chain.pem", "example/fullchain.pem")
+        self.config.save()
+
+        # Verify ssl_module was enabled.
+        self.assertTrue(self.vh_truth[1].enabled)
+        self.assertTrue("ssl_module" in self.config.parser.modules)
+
+        loc_cert = self.config.parser.find_dir(
+            "sslcertificatefile", "example/fullchain.pem", self.vh_truth[1].path)
+        loc_key = self.config.parser.find_dir(
+            "sslcertificateKeyfile", "example/key.pem", self.vh_truth[1].path)
+
+        # Verify one directive was found in the correct file
+        self.assertEqual(len(loc_cert), 1)
+        self.assertEqual(configurator.get_file_path(loc_cert[0]),
+                         self.vh_truth[1].filep)
+
+        self.assertEqual(len(loc_key), 1)
+        self.assertEqual(configurator.get_file_path(loc_key[0]),
+                         self.vh_truth[1].filep)
+
+    def test_deploy_cert_newssl_no_fullchain(self):
+        self.config = util.get_apache_configurator(
+            self.config_path, self.config_dir, self.work_dir, version=(2, 4, 16))
+
+        self.config.parser.modules.add("ssl_module")
+        self.config.parser.modules.add("mod_ssl.c")
+
+        # Get the default 443 vhost
+        self.config.assoc["random.demo"] = self.vh_truth[1]
+        self.assertRaises(errors.PluginError,
+                          lambda: self.config.deploy_cert(
+                              "random.demo", "example/cert.pem", "example/key.pem"))
+
+    def test_deploy_cert_old_apache_no_chain(self):
+        self.config = util.get_apache_configurator(
+            self.config_path, self.config_dir, self.work_dir, version=(2, 4, 7))
+
+        self.config.parser.modules.add("ssl_module")
+        self.config.parser.modules.add("mod_ssl.c")
+
+        # Get the default 443 vhost
+        self.config.assoc["random.demo"] = self.vh_truth[1]
+        self.assertRaises(errors.PluginError,
+                          lambda: self.config.deploy_cert(
+                              "random.demo", "example/cert.pem", "example/key.pem"))
 
     def test_deploy_cert(self):
         self.config.parser.modules.add("ssl_module")
@@ -302,7 +371,9 @@ class TwoVhost80Test(util.ApacheTest):
             "NameVirtualHost", "*:80"))
 
     def test_prepare_server_https(self):
-        self.config.parser.modules.add("ssl_module")
+        mock_enable = mock.Mock()
+        self.config.enable_mod = mock_enable
+
         mock_find = mock.Mock()
         mock_add_dir = mock.Mock()
         mock_find.return_value = []
@@ -312,8 +383,46 @@ class TwoVhost80Test(util.ApacheTest):
         self.config.parser.add_dir_to_ifmodssl = mock_add_dir
 
         self.config.prepare_server_https("443")
-        self.config.prepare_server_https("8080")
+        self.assertEqual(mock_enable.call_args[1], {"temp": False})
+
+        self.config.prepare_server_https("8080", temp=True)
+        # Enable mod is temporary
+        self.assertEqual(mock_enable.call_args[1], {"temp": True})
+
         self.assertEqual(mock_add_dir.call_count, 2)
+
+    def test_prepare_server_https_named_listen(self):
+        mock_find = mock.Mock()
+        mock_find.return_value = ["test1", "test2", "test3"]
+        mock_get = mock.Mock()
+        mock_get.side_effect = ["1.2.3.4:80", "[::1]:80", "1.1.1.1:443"]
+        mock_add_dir = mock.Mock()
+        mock_enable = mock.Mock()
+
+        self.config.parser.find_dir = mock_find
+        self.config.parser.get_arg = mock_get
+        self.config.parser.add_dir_to_ifmodssl = mock_add_dir
+        self.config.enable_mod = mock_enable
+
+        # Test Listen statements with specific ip listeed
+        self.config.prepare_server_https("443")
+        # Should only be 2 here, as the third interface already listens to the correct port
+        self.assertEqual(mock_add_dir.call_count, 2)
+
+        # Check argument to new Listen statements
+        self.assertEqual(mock_add_dir.call_args_list[0][0][2], ["1.2.3.4:443"])
+        self.assertEqual(mock_add_dir.call_args_list[1][0][2], ["[::1]:443"])
+
+        # Reset return lists and inputs
+        mock_add_dir.reset_mock()
+        mock_get.side_effect = ["1.2.3.4:80", "[::1]:80", "1.1.1.1:443"]
+
+        # Test
+        self.config.prepare_server_https("8080", temp=True)
+        self.assertEqual(mock_add_dir.call_count, 3)
+        self.assertEqual(mock_add_dir.call_args_list[0][0][2], ["1.2.3.4:8080", "https"])
+        self.assertEqual(mock_add_dir.call_args_list[1][0][2], ["[::1]:8080", "https"])
+        self.assertEqual(mock_add_dir.call_args_list[2][0][2], ["1.1.1.1:8080", "https"])
 
     def test_make_vhost_ssl(self):
         ssl_vhost = self.config.make_vhost_ssl(self.vh_truth[0])
@@ -339,7 +448,66 @@ class TwoVhost80Test(util.ApacheTest):
         self.assertEqual(self.config.is_name_vhost(self.vh_truth[0]),
                          self.config.is_name_vhost(ssl_vhost))
 
-        self.assertEqual(len(self.config.vhosts), 5)
+        self.assertEqual(len(self.config.vhosts), 7)
+
+    def test_clean_vhost_ssl(self):
+        # pylint: disable=protected-access
+        for directive in ["SSLCertificateFile", "SSLCertificateKeyFile",
+                          "SSLCertificateChainFile", "SSLCACertificatePath"]:
+            for _ in range(10):
+                self.config.parser.add_dir(self.vh_truth[1].path, directive, ["bogus"])
+        self.config.save()
+
+        self.config._clean_vhost(self.vh_truth[1])
+        self.config.save()
+
+        loc_cert = self.config.parser.find_dir(
+            'SSLCertificateFile', None, self.vh_truth[1].path, False)
+        loc_key = self.config.parser.find_dir(
+            'SSLCertificateKeyFile', None, self.vh_truth[1].path, False)
+        loc_chain = self.config.parser.find_dir(
+            'SSLCertificateChainFile', None, self.vh_truth[1].path, False)
+        loc_cacert = self.config.parser.find_dir(
+            'SSLCACertificatePath', None, self.vh_truth[1].path, False)
+
+        self.assertEqual(len(loc_cert), 1)
+        self.assertEqual(len(loc_key), 1)
+
+        self.assertEqual(len(loc_chain), 0)
+
+        self.assertEqual(len(loc_cacert), 10)
+
+    def test_deduplicate_directives(self):
+        # pylint: disable=protected-access
+        DIRECTIVE = "Foo"
+        for _ in range(10):
+            self.config.parser.add_dir(self.vh_truth[1].path, DIRECTIVE, ["bar"])
+        self.config.save()
+
+        self.config._deduplicate_directives(self.vh_truth[1].path, [DIRECTIVE])
+        self.config.save()
+
+        self.assertEqual(
+                         len(self.config.parser.find_dir(
+                             DIRECTIVE, None, self.vh_truth[1].path, False)),
+                         1)
+
+    def test_remove_directives(self):
+        # pylint: disable=protected-access
+        DIRECTIVES = ["Foo", "Bar"]
+        for directive in DIRECTIVES:
+            for _ in range(10):
+                self.config.parser.add_dir(self.vh_truth[1].path, directive, ["baz"])
+        self.config.save()
+
+        self.config._remove_directives(self.vh_truth[1].path, DIRECTIVES)
+        self.config.save()
+
+        for directive in DIRECTIVES:
+            self.assertEqual(
+                             len(self.config.parser.find_dir(
+                                 directive, None, self.vh_truth[1].path, False)),
+                             0)
 
     def test_make_vhost_ssl_extra_vhs(self):
         self.config.aug.match = mock.Mock(return_value=["p1", "p2"])
@@ -368,23 +536,23 @@ class TwoVhost80Test(util.ApacheTest):
         self.config._add_name_vhost_if_necessary(self.vh_truth[0])
         self.assertTrue(self.config.save.called)
 
-    @mock.patch("letsencrypt_apache.configurator.dvsni.ApacheDvsni.perform")
+    @mock.patch("letsencrypt_apache.configurator.tls_sni_01.ApacheTlsSni01.perform")
     @mock.patch("letsencrypt_apache.configurator.ApacheConfigurator.restart")
-    def test_perform(self, mock_restart, mock_dvsni_perform):
+    def test_perform(self, mock_restart, mock_perform):
         # Only tests functionality specific to configurator.perform
         # Note: As more challenges are offered this will have to be expanded
         account_key, achall1, achall2 = self.get_achalls()
 
-        dvsni_ret_val = [
-            achall1.gen_response(account_key),
-            achall2.gen_response(account_key),
+        expected = [
+            achall1.response(account_key),
+            achall2.response(account_key),
         ]
 
-        mock_dvsni_perform.return_value = dvsni_ret_val
+        mock_perform.return_value = expected
         responses = self.config.perform([achall1, achall2])
 
-        self.assertEqual(mock_dvsni_perform.call_count, 1)
-        self.assertEqual(responses, dvsni_ret_val)
+        self.assertEqual(mock_perform.call_count, 1)
+        self.assertEqual(responses, expected)
 
         self.assertEqual(mock_restart.call_count, 1)
 
@@ -434,24 +602,13 @@ class TwoVhost80Test(util.ApacheTest):
         mock_script.side_effect = errors.SubprocessError("Can't find program")
         self.assertRaises(errors.PluginError, self.config.get_version)
 
-    @mock.patch("letsencrypt_apache.configurator.subprocess.Popen")
-    def test_restart(self, mock_popen):
-        """These will be changed soon enough with reload."""
-        mock_popen().returncode = 0
-        mock_popen().communicate.return_value = ("", "")
-
+    @mock.patch("letsencrypt_apache.configurator.le_util.run_script")
+    def test_restart(self, _):
         self.config.restart()
 
-    @mock.patch("letsencrypt_apache.configurator.subprocess.Popen")
-    def test_restart_bad_process(self, mock_popen):
-        mock_popen.side_effect = OSError
-
-        self.assertRaises(errors.MisconfigurationError, self.config.restart)
-
-    @mock.patch("letsencrypt_apache.configurator.subprocess.Popen")
-    def test_restart_failure(self, mock_popen):
-        mock_popen().communicate.return_value = ("", "")
-        mock_popen().returncode = 1
+    @mock.patch("letsencrypt_apache.configurator.le_util.run_script")
+    def test_restart_bad_process(self, mock_run_script):
+        mock_run_script.side_effect = [None, errors.SubprocessError]
 
         self.assertRaises(errors.MisconfigurationError, self.config.restart)
 
@@ -468,14 +625,14 @@ class TwoVhost80Test(util.ApacheTest):
     def test_get_all_certs_keys(self):
         c_k = self.config.get_all_certs_keys()
 
-        self.assertEqual(len(c_k), 1)
+        self.assertEqual(len(c_k), 2)
         cert, key, path = next(iter(c_k))
         self.assertTrue("cert" in cert)
         self.assertTrue("key" in key)
-        self.assertTrue("default-ssl.conf" in path)
+        self.assertTrue("default-ssl" in path)
 
     def test_get_all_certs_keys_malformed_conf(self):
-        self.config.parser.find_dir = mock.Mock(side_effect=[["path"], []])
+        self.config.parser.find_dir = mock.Mock(side_effect=[["path"], [], ["path"], []])
         c_k = self.config.get_all_certs_keys()
 
         self.assertFalse(c_k)
@@ -486,10 +643,10 @@ class TwoVhost80Test(util.ApacheTest):
     def test_get_chall_pref(self):
         self.assertTrue(isinstance(self.config.get_chall_pref(""), list))
 
-    def test_temp_install(self):
-        from letsencrypt_apache.configurator import temp_install
+    def test_install_ssl_options_conf(self):
+        from letsencrypt_apache.configurator import install_ssl_options_conf
         path = os.path.join(self.work_dir, "test_it")
-        temp_install(path)
+        install_ssl_options_conf(path)
         self.assertTrue(os.path.isfile(path))
 
     # TEST ENHANCEMENTS
@@ -500,6 +657,84 @@ class TwoVhost80Test(util.ApacheTest):
         self.assertRaises(
             errors.PluginError,
             self.config.enhance, "letsencrypt.demo", "unknown_enhancement")
+
+    @mock.patch("letsencrypt.le_util.run_script")
+    @mock.patch("letsencrypt.le_util.exe_exists")
+    def test_http_header_hsts(self, mock_exe, _):
+        self.config.parser.update_runtime_variables = mock.Mock()
+        self.config.parser.modules.add("mod_ssl.c")
+        mock_exe.return_value = True
+
+        # This will create an ssl vhost for letsencrypt.demo
+        self.config.enhance("letsencrypt.demo", "ensure-http-header",
+                "Strict-Transport-Security")
+
+        self.assertTrue("headers_module" in self.config.parser.modules)
+
+        # Get the ssl vhost for letsencrypt.demo
+        ssl_vhost = self.config.assoc["letsencrypt.demo"]
+
+        # These are not immediately available in find_dir even with save() and
+        # load(). They must be found in sites-available
+        hsts_header = self.config.parser.find_dir(
+                "Header", None, ssl_vhost.path)
+
+        # four args to HSTS header
+        self.assertEqual(len(hsts_header), 4)
+
+    def test_http_header_hsts_twice(self):
+        self.config.parser.modules.add("mod_ssl.c")
+        # skip the enable mod
+        self.config.parser.modules.add("headers_module")
+
+        # This will create an ssl vhost for letsencrypt.demo
+        self.config.enhance("encryption-example.demo", "ensure-http-header",
+                "Strict-Transport-Security")
+
+        self.assertRaises(
+            errors.PluginEnhancementAlreadyPresent,
+            self.config.enhance, "encryption-example.demo", "ensure-http-header",
+            "Strict-Transport-Security")
+
+    @mock.patch("letsencrypt.le_util.run_script")
+    @mock.patch("letsencrypt.le_util.exe_exists")
+    def test_http_header_uir(self, mock_exe, _):
+        self.config.parser.update_runtime_variables = mock.Mock()
+        self.config.parser.modules.add("mod_ssl.c")
+        mock_exe.return_value = True
+
+        # This will create an ssl vhost for letsencrypt.demo
+        self.config.enhance("letsencrypt.demo", "ensure-http-header",
+                "Upgrade-Insecure-Requests")
+
+        self.assertTrue("headers_module" in self.config.parser.modules)
+
+        # Get the ssl vhost for letsencrypt.demo
+        ssl_vhost = self.config.assoc["letsencrypt.demo"]
+
+        # These are not immediately available in find_dir even with save() and
+        # load(). They must be found in sites-available
+        uir_header = self.config.parser.find_dir(
+                "Header", None, ssl_vhost.path)
+
+        # four args to HSTS header
+        self.assertEqual(len(uir_header), 4)
+
+    def test_http_header_uir_twice(self):
+        self.config.parser.modules.add("mod_ssl.c")
+        # skip the enable mod
+        self.config.parser.modules.add("headers_module")
+
+        # This will create an ssl vhost for letsencrypt.demo
+        self.config.enhance("encryption-example.demo", "ensure-http-header",
+                "Upgrade-Insecure-Requests")
+
+        self.assertRaises(
+            errors.PluginEnhancementAlreadyPresent,
+            self.config.enhance, "encryption-example.demo", "ensure-http-header",
+            "Upgrade-Insecure-Requests")
+
+
 
     @mock.patch("letsencrypt.le_util.run_script")
     @mock.patch("letsencrypt.le_util.exe_exists")
@@ -541,7 +776,7 @@ class TwoVhost80Test(util.ApacheTest):
         self.config.parser.modules.add("rewrite_module")
         self.config.enhance("encryption-example.demo", "redirect")
         self.assertRaises(
-            errors.PluginError,
+            errors.PluginEnhancementAlreadyPresent,
             self.config.enhance, "encryption-example.demo", "redirect")
 
     def test_unknown_rewrite(self):
@@ -553,6 +788,7 @@ class TwoVhost80Test(util.ApacheTest):
         self.assertRaises(
             errors.PluginError,
             self.config.enhance, "letsencrypt.demo", "redirect")
+
     def test_unknown_rewrite2(self):
         # Skip the enable mod
         self.config.parser.modules.add("rewrite_module")
@@ -580,20 +816,20 @@ class TwoVhost80Test(util.ApacheTest):
         self.vh_truth[1].aliases = set(["yes.default.com"])
 
         self.config._enable_redirect(self.vh_truth[1], "")  # pylint: disable=protected-access
-        self.assertEqual(len(self.config.vhosts), 5)
+        self.assertEqual(len(self.config.vhosts), 7)
 
     def get_achalls(self):
         """Return testing achallenges."""
         account_key = self.rsa512jwk
-        achall1 = achallenges.DVSNI(
+        achall1 = achallenges.KeyAuthorizationAnnotatedChallenge(
             challb=acme_util.chall_to_challb(
-                challenges.DVSNI(
+                challenges.TLSSNI01(
                     token="jIq_Xy1mXGN37tb4L6Xj_es58fW571ZNyXekdZzhh7Q"),
                 "pending"),
             domain="encryption-example.demo", account_key=account_key)
-        achall2 = achallenges.DVSNI(
+        achall2 = achallenges.KeyAuthorizationAnnotatedChallenge(
             challb=acme_util.chall_to_challb(
-                challenges.DVSNI(
+                challenges.TLSSNI01(
                     token="uqnaPzxtrndteOqtrXb0Asl5gOJfWAnnx6QJyvcmlDU"),
                 "pending"),
             domain="letsencrypt.demo", account_key=account_key)

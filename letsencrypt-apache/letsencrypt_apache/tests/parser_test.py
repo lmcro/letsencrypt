@@ -52,7 +52,7 @@ class BasicParserTest(util.ParserTest):
         test2 = self.parser.find_dir("documentroot")
 
         self.assertEqual(len(test), 1)
-        self.assertEqual(len(test2), 3)
+        self.assertEqual(len(test2), 4)
 
     def test_add_dir(self):
         aug_default = "/files" + self.parser.loc["default"]
@@ -143,7 +143,7 @@ class BasicParserTest(util.ParserTest):
             'Group: name="www-data" id=33 not_used\n'
         )
         expected_vars = {"TEST": "", "U_MICH": "", "TLS": "443",
-                         "example_path":"Documents/path"}
+                         "example_path": "Documents/path"}
 
         self.parser.update_runtime_variables("ctl")
         self.assertEqual(self.parser.variables, expected_vars)

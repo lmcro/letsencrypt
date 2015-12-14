@@ -50,6 +50,11 @@ class PluginEntryPoint(object):
         """Description with name. Handy for UI."""
         return "{0} ({1})".format(self.description, self.name)
 
+    @property
+    def hidden(self):
+        """Should this plugin be hidden from UI?"""
+        return getattr(self.plugin_cls, "hidden", False)
+
     def ifaces(self, *ifaces_groups):
         """Does plugin implements specified interface groups?"""
         return not ifaces_groups or any(
@@ -114,6 +119,13 @@ class PluginEntryPoint(object):
     def misconfigured(self):
         """Is plugin misconfigured?"""
         return isinstance(self._prepared, errors.MisconfigurationError)
+
+    @property
+    def problem(self):
+        """Return the Exception raised during plugin setup, or None if all is well"""
+        if isinstance(self._prepared, Exception):
+            return self._prepared
+        return None
 
     @property
     def available(self):
@@ -183,6 +195,10 @@ class PluginsRegistry(collections.Mapping):
         return type(self)(dict((name, plugin_ep) for name, plugin_ep
                                in self._plugins.iteritems() if pred(plugin_ep)))
 
+    def visible(self):
+        """Filter plugins based on visibility."""
+        return self.filter(lambda plugin_ep: not plugin_ep.hidden)
+
     def ifaces(self, *ifaces_groups):
         """Filter plugins based on interfaces."""
         # pylint: disable=star-args
@@ -215,7 +231,7 @@ class PluginsRegistry(collections.Mapping):
         Returns ``None`` if ``plugin`` is not found in the registry.
 
         """
-        # use list instead of set beacse PluginEntryPoint is not hashable
+        # use list instead of set because PluginEntryPoint is not hashable
         candidates = [plugin_ep for plugin_ep in self._plugins.itervalues()
                       if plugin_ep.initialized and plugin_ep.init() is plugin]
         assert len(candidates) <= 1

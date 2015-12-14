@@ -12,9 +12,9 @@ from letsencrypt.tests import test_util
 KEY = test_util.load_rsa_private_key('rsa512_key.pem')
 
 # Challenges
-SIMPLE_HTTP = challenges.SimpleHTTP(
+HTTP01 = challenges.HTTP01(
     token="evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ+PCt92wr+oA")
-DVSNI = challenges.DVSNI(
+TLSSNI01 = challenges.TLSSNI01(
     token=jose.b64decode(b"evaGxfADs6pSRb2LAv9IZf17Dt3juxGJyPCt92wrDoA"))
 DNS = challenges.DNS(token="17817c66b60ce2e4012dfad92657527a")
 RECOVERY_CONTACT = challenges.RecoveryContact(
@@ -30,7 +30,7 @@ POP = challenges.ProofOfPossession(
             "16d95b7b63f1972b980b14c20291f3c0d1855d95",
             "48b46570d9fc6358108af43ad1649484def0debf"
         ),
-        certs=(), # TODO
+        certs=(),  # TODO
         subject_key_identifiers=("d0083162dcc4c8a23ecb8aecbd86120e56fd24e5"),
         serial_numbers=(34234239832, 23993939911, 17),
         issuers=(
@@ -41,7 +41,7 @@ POP = challenges.ProofOfPossession(
     )
 )
 
-CHALLENGES = [SIMPLE_HTTP, DVSNI, DNS, RECOVERY_CONTACT, POP]
+CHALLENGES = [HTTP01, TLSSNI01, DNS, RECOVERY_CONTACT, POP]
 DV_CHALLENGES = [chall for chall in CHALLENGES
                  if isinstance(chall, challenges.DVChallenge)]
 CONT_CHALLENGES = [chall for chall in CHALLENGES
@@ -79,13 +79,13 @@ def chall_to_challb(chall, status):  # pylint: disable=redefined-outer-name
 
 
 # Pending ChallengeBody objects
-DVSNI_P = chall_to_challb(DVSNI, messages.STATUS_PENDING)
-SIMPLE_HTTP_P = chall_to_challb(SIMPLE_HTTP, messages.STATUS_PENDING)
+TLSSNI01_P = chall_to_challb(TLSSNI01, messages.STATUS_PENDING)
+HTTP01_P = chall_to_challb(HTTP01, messages.STATUS_PENDING)
 DNS_P = chall_to_challb(DNS, messages.STATUS_PENDING)
 RECOVERY_CONTACT_P = chall_to_challb(RECOVERY_CONTACT, messages.STATUS_PENDING)
 POP_P = chall_to_challb(POP, messages.STATUS_PENDING)
 
-CHALLENGES_P = [SIMPLE_HTTP_P, DVSNI_P, DNS_P, RECOVERY_CONTACT_P, POP_P]
+CHALLENGES_P = [HTTP01_P, TLSSNI01_P, DNS_P, RECOVERY_CONTACT_P, POP_P]
 DV_CHALLENGES_P = [challb for challb in CHALLENGES_P
                    if isinstance(challb.chall, challenges.DVChallenge)]
 CONT_CHALLENGES_P = [

@@ -17,6 +17,7 @@ class Installer(common.Plugin):
     zope.interface.classProvides(interfaces.IPluginFactory)
 
     description = "Null Installer"
+    hidden = True
 
     # pylint: disable=missing-docstring,no-self-use
 
@@ -29,7 +30,8 @@ class Installer(common.Plugin):
     def get_all_names(self):
         return []
 
-    def deploy_cert(self, domain, cert_path, key_path, chain_path=None):
+    def deploy_cert(self, domain, cert_path, key_path,
+                    chain_path=None, fullchain_path=None):
         pass  # pragma: no cover
 
     def enhance(self, domain, enhancement, options=None):
@@ -45,6 +47,9 @@ class Installer(common.Plugin):
         pass  # pragma: no cover
 
     def rollback_checkpoints(self, rollback=1):
+        pass  # pragma: no cover
+
+    def recovery_routine(self):
         pass  # pragma: no cover
 
     def view_config_changes(self):

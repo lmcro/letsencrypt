@@ -5,7 +5,9 @@ import urlparse
 import zope.interface
 
 from letsencrypt import constants
+from letsencrypt import errors
 from letsencrypt import interfaces
+from letsencrypt import le_util
 
 
 class NamespaceConfig(object):
@@ -18,8 +20,7 @@ class NamespaceConfig(object):
     paths defined in :py:mod:`letsencrypt.constants`:
 
       - `accounts_dir`
-      - `cert_dir`
-      - `cert_key_backup`
+      - `csr_dir`
       - `in_progress_dir`
       - `key_dir`
       - `renewer_config_file`
@@ -35,6 +36,13 @@ class NamespaceConfig(object):
     def __init__(self, namespace):
         self.namespace = namespace
 
+        self.namespace.config_dir = os.path.abspath(self.namespace.config_dir)
+        self.namespace.work_dir = os.path.abspath(self.namespace.work_dir)
+        self.namespace.logs_dir = os.path.abspath(self.namespace.logs_dir)
+
+        # Check command line parameters sanity, and error out in case of problem.
+        check_config_sanity(self)
+
     def __getattr__(self, name):
         return getattr(self.namespace, name)
 
@@ -45,7 +53,7 @@ class NamespaceConfig(object):
         return (parsed.netloc + parsed.path).replace('/', os.path.sep)
 
     @property
-    def accounts_dir(self):  #pylint: disable=missing-docstring
+    def accounts_dir(self):  # pylint: disable=missing-docstring
         return os.path.join(
             self.namespace.config_dir, constants.ACCOUNTS_DIR, self.server_path)
 
@@ -54,13 +62,8 @@ class NamespaceConfig(object):
         return os.path.join(self.namespace.work_dir, constants.BACKUP_DIR)
 
     @property
-    def cert_dir(self):  # pylint: disable=missing-docstring
-        return os.path.join(self.namespace.config_dir, constants.CERT_DIR)
-
-    @property
-    def cert_key_backup(self):  # pylint: disable=missing-docstring
-        return os.path.join(self.namespace.work_dir,
-                            constants.CERT_KEY_BACKUP_DIR, self.server_path)
+    def csr_dir(self):  # pylint: disable=missing-docstring
+        return os.path.join(self.namespace.config_dir, constants.CSR_DIR)
 
     @property
     def in_progress_dir(self):  # pylint: disable=missing-docstring
@@ -102,3 +105,23 @@ class RenewerConfiguration(object):
     def renewer_config_file(self):  # pylint: disable=missing-docstring
         return os.path.join(
             self.namespace.config_dir, constants.RENEWER_CONFIG_FILENAME)
+
+
+def check_config_sanity(config):
+    """Validate command line options and display error message if
+    requirements are not met.
+
+    :param config: IConfig instance holding user configuration
+    :type args: :class:`letsencrypt.interfaces.IConfig`
+
+    """
+    # Port check
+    if config.http01_port == config.tls_sni_01_port:
+        raise errors.ConfigurationError(
+            "Trying to run http-01 and tls-sni-01 "
+            "on the same port ({0})".format(config.tls_sni_01_port))
+
+    # Domain checks
+    if config.namespace.domains is not None:
+        for domain in config.namespace.domains:
+            le_util.check_domain_sanity(domain)

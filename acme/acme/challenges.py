@@ -1,9 +1,11 @@
 """ACME Identifier Validation Challenges."""
+import abc
 import functools
 import hashlib
 import logging
 import socket
 
+from cryptography.hazmat.primitives import hashes
 import OpenSSL
 import requests
 
@@ -25,6 +27,14 @@ class Challenge(jose.TypedJSONObjectWithFields):
     """ACME challenge."""
     TYPES = {}
 
+    @classmethod
+    def from_json(cls, jobj):
+        try:
+            return super(Challenge, cls).from_json(jobj)
+        except jose.UnrecognizedTypeError as error:
+            logger.debug(error)
+            return UnrecognizedChallenge.from_json(jobj)
+
 
 class ContinuityChallenge(Challenge):  # pylint: disable=abstract-method
     """Client validation challenges."""
@@ -42,15 +52,38 @@ class ChallengeResponse(jose.TypedJSONObjectWithFields):
     resource = fields.Resource(resource_type)
 
 
-@Challenge.register
-class SimpleHTTP(DVChallenge):
-    """ACME "simpleHttp" challenge.
+class UnrecognizedChallenge(Challenge):
+    """Unrecognized challenge.
 
-    :ivar unicode token:
+    ACME specification defines a generic framework for challenges and
+    defines some standard challenges that are implemented in this
+    module. However, other implementations (including peers) might
+    define additional challenge types, which should be ignored if
+    unrecognized.
+
+    :ivar jobj: Original JSON decoded object.
 
     """
-    typ = "simpleHttp"
 
+    def __init__(self, jobj):
+        super(UnrecognizedChallenge, self).__init__()
+        object.__setattr__(self, "jobj", jobj)
+
+    def to_partial_json(self):
+        # pylint: disable=no-member
+        return self.jobj
+
+    @classmethod
+    def from_json(cls, jobj):
+        return cls(jobj)
+
+
+class _TokenDVChallenge(DVChallenge):
+    """DV Challenge with token.
+
+    :ivar bytes token:
+
+    """
     TOKEN_SIZE = 128 / 8  # Based on the entropy value from the spec
     """Minimum size of the :attr:`token` in bytes."""
 
@@ -59,6 +92,7 @@ class SimpleHTTP(DVChallenge):
         "token", encoder=jose.encode_b64jose, decoder=functools.partial(
             jose.decode_b64jose, size=TOKEN_SIZE, minimum=True))
 
+    # XXX: rename to ~token_good_for_url
     @property
     def good_token(self):  # XXX: @token.decoder
         """Is `token` good?
@@ -73,118 +107,139 @@ class SimpleHTTP(DVChallenge):
         return b'..' not in self.token and b'/' not in self.token
 
 
-@ChallengeResponse.register
-class SimpleHTTPResponse(ChallengeResponse):
-    """ACME "simpleHttp" challenge response.
+class KeyAuthorizationChallengeResponse(ChallengeResponse):
+    """Response to Challenges based on Key Authorization.
 
-    :ivar bool tls:
+    :param unicode key_authorization:
 
     """
-    typ = "simpleHttp"
-    tls = jose.Field("tls", default=True, omitempty=True)
+    key_authorization = jose.Field("keyAuthorization")
+    thumbprint_hash_function = hashes.SHA256
 
-    URI_ROOT_PATH = ".well-known/acme-challenge"
-    """URI root path for the server provisioned resource."""
+    def verify(self, chall, account_public_key):
+        """Verify the key authorization.
 
-    _URI_TEMPLATE = "{scheme}://{domain}/" + URI_ROOT_PATH + "/{token}"
+        :param KeyAuthorization chall: Challenge that corresponds to
+            this response.
+        :param JWK account_public_key:
 
-    CONTENT_TYPE = "application/jose+json"
-
-    @property
-    def scheme(self):
-        """URL scheme for the provisioned resource."""
-        return "https" if self.tls else "http"
-
-    @property
-    def port(self):
-        """Port that the ACME client should be listening for validation."""
-        return 443 if self.tls else 80
-
-    def uri(self, domain, chall):
-        """Create an URI to the provisioned resource.
-
-        Forms an URI to the HTTPS server provisioned resource
-        (containing :attr:`~SimpleHTTP.token`).
-
-        :param unicode domain: Domain name being verified.
-        :param challenges.SimpleHTTP chall:
-
-        """
-        return self._URI_TEMPLATE.format(
-            scheme=self.scheme, domain=domain, token=chall.encode("token"))
-
-    def gen_resource(self, chall):
-        """Generate provisioned resource.
-
-        :param .SimpleHTTP chall:
-        :rtype: SimpleHTTPProvisionedResource
-
-        """
-        return SimpleHTTPProvisionedResource(token=chall.token, tls=self.tls)
-
-    def gen_validation(self, chall, account_key, alg=jose.RS256, **kwargs):
-        """Generate validation.
-
-        :param .SimpleHTTP chall:
-        :param .JWK account_key: Private account key.
-        :param .JWA alg:
-
-        :returns: `.SimpleHTTPProvisionedResource` signed in `.JWS`
-        :rtype: .JWS
-
-        """
-        return jose.JWS.sign(
-            payload=self.gen_resource(chall).json_dumps(
-                sort_keys=True).encode('utf-8'),
-            key=account_key, alg=alg, **kwargs)
-
-    def check_validation(self, validation, chall, account_public_key):
-        """Check validation.
-
-        :param .JWS validation:
-        :param .SimpleHTTP chall:
-        :type account_public_key:
-            `~cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.dsa.DSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.ec.EllipticCurvePublicKey`
-            wrapped in `.ComparableKey
-
+        :return: ``True`` iff verification of the key authorization was
+            successful.
         :rtype: bool
 
         """
-        if not validation.verify(key=account_public_key):
+        parts = self.key_authorization.split('.')  # pylint: disable=no-member
+        if len(parts) != 2:
+            logger.debug("Key authorization (%r) is not well formed",
+                         self.key_authorization)
             return False
 
-        try:
-            resource = SimpleHTTPProvisionedResource.json_loads(
-                validation.payload.decode('utf-8'))
-        except jose.DeserializationError as error:
-            logger.debug(error)
+        if parts[0] != chall.encode("token"):
+            logger.debug("Mismatching token in key authorization: "
+                         "%r instead of %r", parts[0], chall.encode("token"))
             return False
 
-        return resource.token == chall.token and resource.tls == self.tls
+        thumbprint = jose.b64encode(account_public_key.thumbprint(
+            hash_function=self.thumbprint_hash_function)).decode()
+        if parts[1] != thumbprint:
+            logger.debug("Mismatching thumbprint in key authorization: "
+                         "%r instead of %r", parts[0], thumbprint)
+            return False
+
+        return True
+
+
+class KeyAuthorizationChallenge(_TokenDVChallenge):
+    # pylint: disable=abstract-class-little-used,too-many-ancestors
+    """Challenge based on Key Authorization.
+
+    :param response_cls: Subclass of `KeyAuthorizationChallengeResponse`
+        that will be used to generate `response`.
+
+    """
+    __metaclass__ = abc.ABCMeta
+
+    response_cls = NotImplemented
+    thumbprint_hash_function = (
+        KeyAuthorizationChallengeResponse.thumbprint_hash_function)
+
+    def key_authorization(self, account_key):
+        """Generate Key Authorization.
+
+        :param JWK account_key:
+        :rtype unicode:
+
+        """
+        return self.encode("token") + "." + jose.b64encode(
+            account_key.thumbprint(
+                hash_function=self.thumbprint_hash_function)).decode()
+
+    def response(self, account_key):
+        """Generate response to the challenge.
+
+        :param JWK account_key:
+
+        :returns: Response (initialized `response_cls`) to the challenge.
+        :rtype: KeyAuthorizationChallengeResponse
+
+        """
+        return self.response_cls(
+            key_authorization=self.key_authorization(account_key))
+
+    @abc.abstractmethod
+    def validation(self, account_key, **kwargs):
+        """Generate validation for the challenge.
+
+        Subclasses must implement this method, but they are likely to
+        return completely different data structures, depending on what's
+        necessary to complete the challenge. Interepretation of that
+        return value must be known to the caller.
+
+        :param JWK account_key:
+        :returns: Challenge-specific validation.
+
+        """
+        raise NotImplementedError()  # pragma: no cover
+
+    def response_and_validation(self, account_key, *args, **kwargs):
+        """Generate response and validation.
+
+        Convenience function that return results of `response` and
+        `validation`.
+
+        :param JWK account_key:
+        :rtype: tuple
+
+        """
+        return (self.response(account_key),
+                self.validation(account_key, *args, **kwargs))
+
+
+@ChallengeResponse.register
+class HTTP01Response(KeyAuthorizationChallengeResponse):
+    """ACME http-01 challenge response."""
+    typ = "http-01"
+
+    PORT = 80
+    """Verification port as defined by the protocol.
+
+    You can override it (e.g. for testing) by passing ``port`` to
+    `simple_verify`.
+
+    """
+
+    WHITESPACE_CUTSET = "\n\r\t "
+    """Whitespace characters which should be ignored at the end of the body."""
 
     def simple_verify(self, chall, domain, account_public_key, port=None):
         """Simple verify.
 
-        According to the ACME specification, "the ACME server MUST
-        ignore the certificate provided by the HTTPS server", so
-        ``requests.get`` is called with ``verify=False``.
-
-        :param .SimpleHTTP chall: Corresponding challenge.
+        :param challenges.SimpleHTTP chall: Corresponding challenge.
         :param unicode domain: Domain name being verified.
         :param account_public_key: Public key for the key pair
             being authorized. If ``None`` key verification is not
             performed!
-        :type account_public_key:
-            `~cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.dsa.DSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.ec.EllipticCurvePublicKey`
-            wrapped in `.ComparableKey
+        :param JWK account_public_key:
         :param int port: Port used in the validation.
 
         :returns: ``True`` iff validation is successful, ``False``
@@ -192,136 +247,122 @@ class SimpleHTTPResponse(ChallengeResponse):
         :rtype: bool
 
         """
+        if not self.verify(chall, account_public_key):
+            logger.debug("Verification of key authorization in response failed")
+            return False
+
         # TODO: ACME specification defines URI template that doesn't
         # allow to use a custom port... Make sure port is not in the
         # request URI, if it's standard.
-        if port is not None and port != self.port:
-            logger.warn(
-                "Using non-standard port for SimpleHTTP verification: %s", port)
+        if port is not None and port != self.PORT:
+            logger.warning(
+                "Using non-standard port for http-01 verification: %s", port)
             domain += ":{0}".format(port)
 
-        uri = self.uri(domain, chall)
+        uri = chall.uri(domain)
         logger.debug("Verifying %s at %s...", chall.typ, uri)
         try:
-            http_response = requests.get(uri, verify=False)
+            http_response = requests.get(uri)
         except requests.exceptions.RequestException as error:
             logger.error("Unable to reach %s: %s", uri, error)
             return False
         logger.debug("Received %s: %s. Headers: %s", http_response,
                      http_response.text, http_response.headers)
 
-        if self.CONTENT_TYPE != http_response.headers.get(
-                "Content-Type", self.CONTENT_TYPE):
+        challenge_response = http_response.text.rstrip(self.WHITESPACE_CUTSET)
+        if self.key_authorization != challenge_response:
+            logger.debug("Key authorization from response (%r) doesn't match "
+                         "HTTP response (%r)", self.key_authorization,
+                         challenge_response)
             return False
 
-        try:
-            validation = jose.JWS.json_loads(http_response.text)
-        except jose.DeserializationError as error:
-            logger.debug(error)
-            return False
-
-        return self.check_validation(validation, chall, account_public_key)
+        return True
 
 
-class SimpleHTTPProvisionedResource(jose.JSONObjectWithFields):
-    """SimpleHTTP provisioned resource."""
-    typ = fields.Fixed("type", SimpleHTTP.typ)
-    token = SimpleHTTP._fields["token"]
-    # If the "tls" field is not included in the response, then
-    # validation object MUST have its "tls" field set to "true".
-    tls = jose.Field("tls", omitempty=False)
+@Challenge.register  # pylint: disable=too-many-ancestors
+class HTTP01(KeyAuthorizationChallenge):
+    """ACME http-01 challenge."""
+    response_cls = HTTP01Response
+    typ = response_cls.typ
 
+    URI_ROOT_PATH = ".well-known/acme-challenge"
+    """URI root path for the server provisioned resource."""
 
-@Challenge.register
-class DVSNI(DVChallenge):
-    """ACME "dvsni" challenge.
+    @property
+    def path(self):
+        """Path (starting with '/') for provisioned resource.
 
-    :ivar bytes token: Random data, **not** base64-encoded.
-
-    """
-    typ = "dvsni"
-
-    PORT = 443
-    """Port to perform DVSNI challenge."""
-
-    TOKEN_SIZE = 128 / 8  # Based on the entropy value from the spec
-    """Minimum size of the :attr:`token` in bytes."""
-
-    token = jose.Field(
-        "token", encoder=jose.encode_b64jose, decoder=functools.partial(
-            jose.decode_b64jose, size=TOKEN_SIZE, minimum=True))
-
-    def gen_response(self, account_key, alg=jose.RS256, **kwargs):
-        """Generate response.
-
-        :param .JWK account_key: Private account key.
-        :rtype: .DVSNIResponse
+        :rtype: string
 
         """
-        return DVSNIResponse(validation=jose.JWS.sign(
-            payload=self.json_dumps(sort_keys=True).encode('utf-8'),
-            key=account_key, alg=alg, **kwargs))
+        return '/' + self.URI_ROOT_PATH + '/' + self.encode('token')
+
+    def uri(self, domain):
+        """Create an URI to the provisioned resource.
+
+        Forms an URI to the HTTPS server provisioned resource
+        (containing :attr:`~SimpleHTTP.token`).
+
+        :param unicode domain: Domain name being verified.
+        :rtype: string
+
+        """
+        return "http://" + domain + self.path
+
+    def validation(self, account_key, **unused_kwargs):
+        """Generate validation.
+
+        :param JWK account_key:
+        :rtype: unicode
+
+        """
+        return self.key_authorization(account_key)
 
 
 @ChallengeResponse.register
-class DVSNIResponse(ChallengeResponse):
-    """ACME "dvsni" challenge response.
-
-    :param bytes s: Random data, **not** base64-encoded.
-
-    """
-    typ = "dvsni"
+class TLSSNI01Response(KeyAuthorizationChallengeResponse):
+    """ACME tls-sni-01 challenge response."""
+    typ = "tls-sni-01"
 
     DOMAIN_SUFFIX = b".acme.invalid"
     """Domain name suffix."""
 
-    PORT = DVSNI.PORT
-    """Port to perform DVSNI challenge."""
+    PORT = 443
+    """Verification port as defined by the protocol.
 
-    validation = jose.Field("validation", decoder=jose.JWS.from_json)
+    You can override it (e.g. for testing) by passing ``port`` to
+    `simple_verify`.
+
+    """
 
     @property
-    def z(self):  # pylint: disable=invalid-name
-        """The ``z``  parameter.
+    def z(self):
+        """``z`` value used for verification.
 
-        :rtype: bytes
+        :rtype bytes:
 
         """
-        # Instance of 'Field' has no 'signature' member
-        # pylint: disable=no-member
-        return hashlib.sha256(self.validation.signature.encode(
-            "signature").encode("utf-8")).hexdigest().encode()
+        return hashlib.sha256(
+            self.key_authorization.encode("utf-8")).hexdigest().lower().encode()
 
     @property
     def z_domain(self):
-        """Domain name for certificate subjectAltName.
+        """Domain name used for verification, generated from `z`.
 
-        :rtype: bytes
-
-        """
-        z = self.z  # pylint: disable=invalid-name
-        return z[:32] + b'.' + z[32:] + self.DOMAIN_SUFFIX
-
-    @property
-    def chall(self):
-        """Get challenge encoded in the `validation` payload.
-
-        :rtype: DVSNI
+        :rtype bytes:
 
         """
-        # pylint: disable=no-member
-        return DVSNI.json_loads(self.validation.payload.decode('utf-8'))
+        return self.z[:32] + b'.' + self.z[32:] + self.DOMAIN_SUFFIX
 
     def gen_cert(self, key=None, bits=2048):
-        """Generate DVSNI certificate.
+        """Generate tls-sni-01 certificate.
 
         :param OpenSSL.crypto.PKey key: Optional private key used in
             certificate generation. If not provided (``None``), then
             fresh key will be generated.
         :param int bits: Number of bits for newly generated key.
 
-        :rtype: `tuple` of `OpenSSL.crypto.X509` and
-            `OpenSSL.crypto.PKey`
+        :rtype: `tuple` of `OpenSSL.crypto.X509` and `OpenSSL.crypto.PKey`
 
         """
         if key is None:
@@ -332,11 +373,12 @@ class DVSNIResponse(ChallengeResponse):
             'dummy', self.z_domain.decode()], force_san=True), key
 
     def probe_cert(self, domain, **kwargs):
-        """Probe DVSNI challenge certificate.
+        """Probe tls-sni-01 challenge certificate.
 
         :param unicode domain:
 
         """
+        # TODO: domain is not necessary if host is provided
         if "host" not in kwargs:
             host = socket.gethostbyname(domain)
             logging.debug('%s resolved to %s', domain, host)
@@ -349,7 +391,7 @@ class DVSNIResponse(ChallengeResponse):
         return crypto_util.probe_sni(**kwargs)
 
     def verify_cert(self, cert):
-        """Verify DVSNI challenge certificate."""
+        """Verify tls-sni-01 challenge certificate."""
         # pylint: disable=protected-access
         sans = crypto_util._pyopenssl_cert_or_req_san(cert)
         logging.debug('Certificate %s. SANs: %s', cert.digest('sha1'), sans)
@@ -360,40 +402,24 @@ class DVSNIResponse(ChallengeResponse):
         """Simple verify.
 
         Verify ``validation`` using ``account_public_key``, optionally
-        probe DVSNI certificate and check using `verify_cert`.
+        probe tls-sni-01 certificate and check using `verify_cert`.
 
-        :param .challenges.DVSNI chall: Corresponding challenge.
+        :param .challenges.TLSSNI01 chall: Corresponding challenge.
         :param str domain: Domain name being validated.
-        :type account_public_key:
-            `~cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.dsa.DSAPublicKey`
-            or
-            `~cryptography.hazmat.primitives.asymmetric.ec.EllipticCurvePublicKey`
-            wrapped in `.ComparableKey
+        :param JWK account_public_key:
         :param OpenSSL.crypto.X509 cert: Optional certificate. If not
             provided (``None``) certificate will be retrieved using
             `probe_cert`.
+        :param int port: Port used to probe the certificate.
+
 
         :returns: ``True`` iff client's control of the domain has been
             verified, ``False`` otherwise.
         :rtype: bool
 
         """
-        # pylint: disable=no-member
-        if not self.validation.verify(key=account_public_key):
-            return False
-
-        # TODO: it's not checked that payload has exectly 2 fields!
-        try:
-            decoded_chall = self.chall
-        except jose.DeserializationError as error:
-            logger.debug(error, exc_info=True)
-            return False
-
-        if decoded_chall.token != chall.token:
-            logger.debug("Wrong token: expected %r, found %r",
-                         chall.token, decoded_chall.token)
+        if not self.verify(chall, account_public_key):
+            logger.debug("Verification of key authorization in response failed")
             return False
 
         if cert is None:
@@ -404,6 +430,29 @@ class DVSNIResponse(ChallengeResponse):
                 return False
 
         return self.verify_cert(cert)
+
+
+@Challenge.register  # pylint: disable=too-many-ancestors
+class TLSSNI01(KeyAuthorizationChallenge):
+    """ACME tls-sni-01 challenge."""
+    response_cls = TLSSNI01Response
+    typ = response_cls.typ
+
+    # boulder#962, ietf-wg-acme#22
+    #n = jose.Field("n", encoder=int, decoder=int)
+
+    def validation(self, account_key, **kwargs):
+        """Generate validation.
+
+        :param JWK account_key:
+        :param OpenSSL.crypto.PKey cert_key: Optional private key used
+            in certificate generation. If not provided (``None``), then
+            fresh key will be generated.
+
+        :rtype: `tuple` of `OpenSSL.crypto.X509` and `OpenSSL.crypto.PKey`
+
+        """
+        return self.response(account_key).gen_cert(key=kwargs.get('cert_key'))
 
 
 @Challenge.register
@@ -449,7 +498,7 @@ class ProofOfPossession(ContinuityChallenge):
     class Hints(jose.JSONObjectWithFields):
         """Hints for "proofOfPossession" challenge.
 
-        :ivar jwk: JSON Web Key (:class:`acme.jose.JWK`)
+        :ivar JWK jwk: JSON Web Key
         :ivar tuple cert_fingerprints: `tuple` of `unicode`
         :ivar tuple certs: Sequence of :class:`acme.jose.ComparableX509`
             certificates.
@@ -506,18 +555,84 @@ class ProofOfPossessionResponse(ChallengeResponse):
         return self.signature.verify(self.nonce)
 
 
-@Challenge.register
-class DNS(DVChallenge):
-    """ACME "dns" challenge.
-
-    :ivar unicode token:
-
-    """
+@Challenge.register  # pylint: disable=too-many-ancestors
+class DNS(_TokenDVChallenge):
+    """ACME "dns" challenge."""
     typ = "dns"
-    token = jose.Field("token")
+
+    LABEL = "_acme-challenge"
+    """Label clients prepend to the domain name being validated."""
+
+    def gen_validation(self, account_key, alg=jose.RS256, **kwargs):
+        """Generate validation.
+
+        :param .JWK account_key: Private account key.
+        :param .JWA alg:
+
+        :returns: This challenge wrapped in `.JWS`
+        :rtype: .JWS
+
+        """
+        return jose.JWS.sign(
+            payload=self.json_dumps(sort_keys=True).encode('utf-8'),
+            key=account_key, alg=alg, **kwargs)
+
+    def check_validation(self, validation, account_public_key):
+        """Check validation.
+
+        :param JWS validation:
+        :param JWK account_public_key:
+        :rtype: bool
+
+        """
+        if not validation.verify(key=account_public_key):
+            return False
+        try:
+            return self == self.json_loads(
+                validation.payload.decode('utf-8'))
+        except jose.DeserializationError as error:
+            logger.debug("Checking validation for DNS failed: %s", error)
+            return False
+
+    def gen_response(self, account_key, **kwargs):
+        """Generate response.
+
+        :param .JWK account_key: Private account key.
+        :param .JWA alg:
+
+        :rtype: DNSResponse
+
+        """
+        return DNSResponse(validation=self.gen_validation(
+            self, account_key, **kwargs))
+
+    def validation_domain_name(self, name):
+        """Domain name for TXT validation record.
+
+        :param unicode name: Domain name being validated.
+
+        """
+        return "{0}.{1}".format(self.LABEL, name)
 
 
 @ChallengeResponse.register
 class DNSResponse(ChallengeResponse):
-    """ACME "dns" challenge response."""
+    """ACME "dns" challenge response.
+
+    :param JWS validation:
+
+    """
     typ = "dns"
+
+    validation = jose.Field("validation", decoder=jose.JWS.from_json)
+
+    def check_validation(self, chall, account_public_key):
+        """Check validation.
+
+        :param challenges.DNS chall:
+        :param JWK account_public_key:
+
+        :rtype: bool
+
+        """
+        return chall.check_validation(self.validation, account_public_key)
