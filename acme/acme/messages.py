@@ -23,13 +23,15 @@ class Error(jose.JSONObjectWithFields, errors.Error):
             ('badCSR', 'The CSR is unacceptable (e.g., due to a short key)'),
             ('badNonce', 'The client sent an unacceptable anti-replay nonce'),
             ('connection', 'The server could not connect to the client to '
-                'verify the domain'),
+             'verify the domain'),
             ('dnssec', 'The server could not validate a DNSSEC signed domain'),
+            ('invalidEmail',
+             'The provided email for a registration was invalid'),
             ('malformed', 'The request message was malformed'),
             ('rateLimited', 'There were too many requests of a given type'),
             ('serverInternal', 'The server experienced an internal error'),
             ('tls', 'The server experienced a TLS error during domain '
-                'verification'),
+             'verification'),
             ('unauthorized', 'The client lacks sufficient authorization'),
             ('unknownHost', 'The server could not resolve a domain name'),
         )
@@ -121,6 +123,12 @@ class Directory(jose.JSONDeSerializable):
 
     _REGISTERED_TYPES = {}
 
+    class Meta(jose.JSONObjectWithFields):
+        """Directory Meta."""
+        terms_of_service = jose.Field('terms-of-service', omitempty=True)
+        website = jose.Field('website', omitempty=True)
+        caa_identities = jose.Field('caa-identities', omitempty=True)
+
     @classmethod
     def _canon_key(cls, key):
         return getattr(key, 'resource_type', key)
@@ -128,16 +136,18 @@ class Directory(jose.JSONDeSerializable):
     @classmethod
     def register(cls, resource_body_cls):
         """Register resource."""
-        assert resource_body_cls.resource_type not in cls._REGISTERED_TYPES
-        cls._REGISTERED_TYPES[resource_body_cls.resource_type] = resource_body_cls
+        resource_type = resource_body_cls.resource_type
+        assert resource_type not in cls._REGISTERED_TYPES
+        cls._REGISTERED_TYPES[resource_type] = resource_body_cls
         return resource_body_cls
 
     def __init__(self, jobj):
         canon_jobj = util.map_keys(jobj, self._canon_key)
-        if not set(canon_jobj).issubset(self._REGISTERED_TYPES):
+        if not set(canon_jobj).issubset(
+                set(self._REGISTERED_TYPES).union(['meta'])):
             # TODO: acme-spec is not clear about this: 'It is a JSON
             # dictionary, whose keys are the "resource" values listed
-            # in {{https-requests}}'z
+            # in {{https-requests}}'
             raise ValueError('Wrong directory fields')
         # TODO: check that everything is an absolute URL; acme-spec is
         # not clear on that
@@ -160,6 +170,7 @@ class Directory(jose.JSONDeSerializable):
 
     @classmethod
     def from_json(cls, jobj):
+        jobj['meta'] = cls.Meta.from_json(jobj.pop('meta', {}))
         try:
             return cls(jobj)
         except ValueError as error:

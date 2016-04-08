@@ -18,16 +18,17 @@ The Let's Encrypt Client is a fully-featured, extensible client for the Let's
 Encrypt CA (or any other CA that speaks the `ACME
 <https://github.com/ietf-wg-acme/acme/blob/master/draft-ietf-acme-acme.md>`_
 protocol) that can automate the tasks of obtaining certificates and
-configuring webservers to use them.
+configuring webservers to use them. This client runs on Unix-based operating
+systems.
 
 Installation
 ------------
 
-If ``letsencrypt`` is packaged for your OS, you can install it from there, and
-run it by typing ``letsencrypt``.  Because not all operating systems have
-packages yet, we provide a temporary solution via the ``letsencrypt-auto``
-wrapper script, which obtains some dependencies from your OS and puts others
-in a python virtual environment::
+If ``letsencrypt`` is packaged for your Unix OS, you can install it from
+there, and run it by typing ``letsencrypt``.  Because not all operating
+systems have packages yet, we provide a temporary solution via the
+``letsencrypt-auto`` wrapper script, which obtains some dependencies
+from your OS and puts others in a python virtual environment::
 
   user@webserver:~$ git clone https://github.com/letsencrypt/letsencrypt
   user@webserver:~$ cd letsencrypt
@@ -51,11 +52,11 @@ client will guide you through the process of obtaining and installing certs
 interactively.
 
 You can also tell it exactly what you want it to do from the command line.
-For instance, if you want to obtain a cert for ``thing.com``,
-``www.thing.com``, and ``otherthing.net``, using the Apache plugin to both
+For instance, if you want to obtain a cert for ``example.com``,
+``www.example.com``, and ``other.example.net``, using the Apache plugin to both
 obtain and install the certs, you could do this::
 
-  ./letsencrypt-auto --apache -d thing.com -d www.thing.com -d otherthing.net
+  ./letsencrypt-auto --apache -d example.com -d www.example.com -d other.example.net
 
 (The first time you run the command, it will make an account, and ask for an
 email and agreement to the Let's Encrypt Subscriber Agreement; you can
@@ -64,7 +65,7 @@ automate those with ``--email`` and ``--agree-tos``)
 If you want to use a webserver that doesn't have full plugin support yet, you
 can still use "standalone" or "webroot" plugins to obtain a certificate::
 
-  ./letsencrypt-auto certonly --standalone --email admin@thing.com -d thing.com -d www.thing.com -d otherthing.net
+  ./letsencrypt-auto certonly --standalone --email admin@example.com -d example.com -d www.example.com -d other.example.net
 
 
 Understanding the client in more depth
@@ -89,6 +90,11 @@ Main Website: https://letsencrypt.org/
 IRC Channel: #letsencrypt on `Freenode`_
 
 Community: https://community.letsencrypt.org
+
+ACME spec: http://ietf-wg-acme.github.io/acme/
+
+ACME working area in github: https://github.com/ietf-wg-acme/acme
+
 
 Mailing list: `client-dev`_ (to subscribe without a Google account, send an
 email to client-dev+subscribe@letsencrypt.org)
